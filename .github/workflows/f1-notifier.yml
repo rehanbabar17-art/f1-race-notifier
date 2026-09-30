@@ -1,0 +1,61 @@
+name: F1 Race Notifier
+
+on:
+  workflow_dispatch:
+    inputs:
+      year:
+        description: "F1 season year"
+        required: false
+        default: "2026"
+        type: string
+      timezone:
+        description: "Timezone used for morning reminders"
+        required: false
+        default: "Asia/Karachi"
+        type: string
+
+env:
+  B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+  B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+  B2_BUCKET: ${{ secrets.B2_BUCKET }}
+  B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+  F1_STATE_FILE: /tmp/f1-state.json
+  F1_YEAR: ${{ inputs.year || '2026' }}
+  USER_TIMEZONE: ${{ inputs.timezone || 'Asia/Karachi' }}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore notification state from B2
+        env:
+          B2_COMMAND: download
+        run: python f1_notifier/b2_sync.py
+
+      - name: Check F1 schedule and send ntfy notifications
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python f1_notifier/main.py
+
+      - name: Persist notification state to B2
+        if: always()
+        env:
+          B2_COMMAND: upload
+        run: python f1_notifier/b2_sync.py
+
+      - name: Remove temporary state
+        if: always()
+        run: rm -f "$F1_STATE_FILE"
