@@ -60,7 +60,7 @@ def notify(message: str, title: str, priority: str = "default") -> None:
         data=message.encode("utf-8"),
         headers={
             "User-Agent": USER_AGENT,
-            "Title": title,
+            "Title": title.encode("ascii", "replace").decode("ascii"),
             "Priority": priority,
             "Tags": "checkered_flag",
         },
