@@ -4,6 +4,11 @@ A cron-friendly Formula 1 notification service. It sends a weekly race-week sche
 
 The script runs in GitHub Actions. **cron-job.org sends an authenticated workflow-dispatch request every five minutes**, so the repository does not need an always-on server.
 
+GitHub Actions must be enabled and able to start a hosted runner for the repository. If a
+workflow appears as failed before the first step, check the repository's **Actions** settings
+and the account's GitHub Actions usage/billing status; this is a GitHub runner-account issue,
+not an F1 API or ntfy configuration error.
+
 ## What it sends
 
 - **Seven-day schedule:** one ntfy message when a Grand Prix meeting first enters the next-seven-days window.
