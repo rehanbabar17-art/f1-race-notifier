@@ -18,6 +18,7 @@ USER_TZ = ZoneInfo(os.environ.get("USER_TIMEZONE", "Asia/Karachi"))
 STATE_FILE = Path(os.environ.get("F1_STATE_FILE", "/tmp/f1-state.json"))
 USER_AGENT = "F1RaceNotifier/1.0 (+https://github.com/rehanbabar17-art/f1-race-notifier)"
 REMINDER_TYPES = {"Sprint", "Qualifying", "Race"}
+SCHEDULE_WINDOWS = (30, 14, 7)
 
 
 def api_get(path: str, **params):
@@ -124,12 +125,12 @@ def session_label(session: dict) -> str:
     return f"{session['country_name']} GP — {session['session_name']}"
 
 
-def format_schedule(upcoming: list[dict]) -> str:
+def format_schedule(upcoming: list[dict], days: int) -> str:
     grouped: dict[str, list[dict]] = {}
     for item in upcoming:
         local = parse_time(item["date_start"]).astimezone(USER_TZ)
         grouped.setdefault(local.strftime("%A, %d %b"), []).append(item)
-    lines = ["🏎️ F1 schedule in the next 7 days", ""]
+    lines = [f"🏎️ F1 races in the next {days} days", ""]
     for day, items in grouped.items():
         lines.append(day)
         for item in items:
@@ -168,18 +169,25 @@ def main() -> None:
     state = load_state()
     sent = state["sent"]
     all_sessions = sessions()
-    upcoming = [
-        item for item in all_sessions
-        if now <= parse_time(item["date_start"]) <= now + timedelta(days=7)
-    ]
+    upcoming_races = [item for item in all_sessions if item["session_name"] == "Race"]
 
-    # One schedule message per meeting as it enters the seven-day window.
-    for meeting_key in sorted({item["meeting_key"] for item in upcoming}):
-        key = f"schedule:{YEAR}:{meeting_key}"
-        meeting_items = [item for item in upcoming if item["meeting_key"] == meeting_key]
-        if key not in sent:
-            notify(format_schedule(meeting_items), "F1 schedule — next 7 days")
-            sent[key] = now.isoformat()
+    # Send a full window schedule the first time a new meeting appears in it.
+    # Rechecking on each run lets newly added races trigger an updated schedule.
+    for days in SCHEDULE_WINDOWS:
+        deadline = now + timedelta(days=days)
+        window_races = [
+            item for item in upcoming_races
+            if now <= parse_time(item["date_start"]) <= deadline
+        ]
+        pending_meetings = sorted({
+            item["meeting_key"] for item in window_races
+            if f"schedule:{YEAR}:{days}:{item['meeting_key']}" not in sent
+        })
+        if not pending_meetings:
+            continue
+        notify(format_schedule(window_races, days), f"F1 schedule — next {days} days")
+        for meeting_key in pending_meetings:
+            sent[f"schedule:{YEAR}:{days}:{meeting_key}"] = now.isoformat()
 
     # One morning reminder for Sprint, Qualifying, and Race sessions on the user's day.
     local_today = now.astimezone(USER_TZ).date()

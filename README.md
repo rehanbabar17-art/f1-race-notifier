@@ -1,6 +1,6 @@
 # F1 Race Notifier
 
-A cron-friendly Formula 1 notification service. It sends a weekly race-week schedule, start-of-day reminders for sprint/qualifying/race sessions, and session results after practice, sprint, qualifying, and race sessions become available.
+A cron-friendly Formula 1 notification service. It sends race schedules for the next 30, 14, and 7 days, start-of-day reminders for sprint/qualifying/race sessions, and session results after practice, sprint, qualifying, and race sessions become available.
 
 The script runs in GitHub Actions. **cron-job.org sends an authenticated workflow-dispatch request every five minutes**, so the repository does not need an always-on server.
 
@@ -11,7 +11,7 @@ not an F1 API or ntfy configuration error.
 
 ## What it sends
 
-- **Seven-day schedule:** one ntfy message when a Grand Prix meeting first enters the next-seven-days window.
+- **Race schedules:** ntfy messages list Grand Prix races in the next 30, 14, and 7 days. A window is updated when a newly scheduled race first appears within it; each meeting is announced once per window.
 - **Morning reminder:** one message on the user's local calendar day listing that day's Sprint, Qualifying, and Race sessions.
 - **Results:** one message per Practice, Sprint, Qualifying, and Race session after OpenF1 publishes the final session result. If a result is not available yet, the next cron run retries it.
 - **Deduplication:** sent-message state is stored in `f1-race-notifier/state.json` inside the shared Backblaze B2 bucket.
@@ -122,7 +122,7 @@ Open **Actions → F1 Race Notifier → Run workflow**, choose the season and ti
 
 ## Important timing behavior
 
-The seven-day message is sent when the job first observes a meeting within seven days. The morning message is sent on the first job run on that local calendar day; it is not scheduled at a particular local clock minute. Results are sent as soon as a five-minute poll observes that OpenF1 has published them.
+Each race schedule is sent when the job first observes one or more unannounced meetings within its 30-, 14-, or 7-day window. If OpenF1 adds a race later, the next poll sends an updated full schedule for each applicable window. The morning message is sent on the first job run on that local calendar day; it is not scheduled at a particular local clock minute. Results are sent as soon as a five-minute poll observes that OpenF1 has published them.
 
 If cron-job.org is disabled after repeated failures, inspect its execution history and GitHub Actions runs. cron-job.org documents automatic deactivation after more than 25 consecutive failures.
 
