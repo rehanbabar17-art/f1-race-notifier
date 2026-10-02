@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -20,14 +21,34 @@ REMINDER_TYPES = {"Sprint", "Qualifying", "Race"}
 
 
 def api_get(path: str, **params):
-    response = requests.get(
-        f"{API}/{path}",
-        params=params,
-        headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
-        timeout=20,
-    )
-    response.raise_for_status()
-    return response.json()
+    last_error = None
+    for attempt in range(3):
+        try:
+            response = requests.get(
+                f"{API}/{path}",
+                params=params,
+                headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+                timeout=20,
+            )
+            if response.status_code in {401, 408, 425, 429} or response.status_code >= 500:
+                retry_after = response.headers.get("Retry-After")
+                delay = min(float(retry_after), 20) if retry_after and retry_after.isdigit() else 2 ** attempt
+                last_error = requests.HTTPError(
+                    f"{response.status_code} Server/API response for {response.url}", response=response
+                )
+                if attempt < 2:
+                    print(f"OpenF1 temporary response {response.status_code}; retrying in {delay}s")
+                    time.sleep(delay)
+                    continue
+            response.raise_for_status()
+            return response.json()
+        except (requests.RequestException, ValueError) as error:
+            last_error = error
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+                continue
+            raise
+    raise last_error or RuntimeError(f"OpenF1 request failed: {path}")
 
 
 def parse_time(value: str) -> datetime:
@@ -55,22 +76,35 @@ def notify(message: str, title: str, priority: str = "default") -> None:
     topic = os.environ.get("NTFY_TOPIC", "").strip()
     if not topic:
         raise RuntimeError("NTFY_TOPIC is not configured")
-    response = requests.post(
-        f"https://ntfy.sh/{topic}",
-        data=message.encode("utf-8"),
-        headers={
-            "User-Agent": USER_AGENT,
-            "Title": title.encode("ascii", "replace").decode("ascii"),
-            "Priority": priority,
-            "Tags": "checkered_flag",
-        },
-        timeout=20,
-    )
-    response.raise_for_status()
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                f"https://ntfy.sh/{topic}",
+                data=message.encode("utf-8"),
+                headers={
+                    "User-Agent": USER_AGENT,
+                    "Title": title.encode("ascii", "replace").decode("ascii"),
+                    "Priority": priority,
+                    "Tags": "checkered_flag",
+                },
+                timeout=20,
+            )
+            response.raise_for_status()
+            return
+        except requests.RequestException:
+            if attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
 
 
 def sessions() -> list[dict]:
-    data = api_get("sessions", year=YEAR)
+    try:
+        data = api_get("sessions", year=YEAR)
+    except requests.RequestException as error:
+        # A transient upstream outage should not turn into repeated cron failures.
+        # The next cron poll will retry and state remains unchanged.
+        print(f"OpenF1 sessions unavailable; skipping this poll: {error}")
+        return []
     return [item for item in data if not item.get("is_cancelled")]
 
 
