@@ -18,6 +18,11 @@ not an F1 API or ntfy configuration error.
 
 Results are intentionally limited to the top 10 entries in the notification to keep ntfy messages readable; the source API remains available for the complete result set.
 
+The OpenF1 client retries temporary `401`, `408`, `425`, `429`, `5xx`, timeout, and connection
+errors. If the sessions endpoint remains unavailable for a poll, the run exits successfully
+without changing deduplication state; the next cron poll retries instead of creating a chain of
+failed cron executions.
+
 ## Data source
 
 The notifier uses [OpenF1](https://openf1.org/), a public Formula 1 data API. It provides session schedules and session results for practice, qualifying, sprint, and race sessions. OpenF1 documents a free tier with no API key, historical data from 2023 onward, and a limit of 30 requests per minute. A five-minute cron interval stays comfortably below that limit for normal use.
