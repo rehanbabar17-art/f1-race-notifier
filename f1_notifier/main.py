@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 API = "https://api.openf1.org/v1"
+JOLPICA_API = "https://api.jolpi.ca/ergast/f1"
 YEAR = int(os.environ.get("F1_YEAR", datetime.now(timezone.utc).year))
 USER_TZ = ZoneInfo(os.environ.get("USER_TIMEZONE", "Asia/Karachi"))
 STATE_FILE = Path(os.environ.get("F1_STATE_FILE", "/tmp/f1-state.json"))
@@ -50,6 +51,16 @@ def api_get(path: str, **params):
                 continue
             raise
     raise last_error or RuntimeError(f"OpenF1 request failed: {path}")
+
+
+def jolpica_get(path: str):
+    response = requests.get(
+        f"{JOLPICA_API}/{path}",
+        headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        timeout=20,
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 def parse_time(value: str) -> datetime:
@@ -104,9 +115,53 @@ def sessions() -> list[dict]:
     except requests.RequestException as error:
         # A transient upstream outage should not turn into repeated cron failures.
         # The next cron poll will retry and state remains unchanged.
-        print(f"OpenF1 sessions unavailable; skipping this poll: {error}")
-        return []
+        print(f"OpenF1 sessions unavailable; using Jolpica fallback: {error}")
+        try:
+            return fallback_sessions()
+        except requests.RequestException as fallback_error:
+            print(f"Jolpica schedule unavailable; skipping this poll: {fallback_error}")
+            return []
     return [item for item in data if not item.get("is_cancelled")]
+
+
+def fallback_sessions() -> list[dict]:
+    """Convert Jolpica's race calendar into the session shape used by the notifier."""
+    payload = jolpica_get(f"{YEAR}.json")
+    races = payload.get("MRData", {}).get("RaceTable", {}).get("Races", [])
+    output = []
+    session_fields = (
+        ("FirstPractice", "Practice 1"),
+        ("SecondPractice", "Practice 2"),
+        ("ThirdPractice", "Practice 3"),
+        ("SprintQualifying", "Sprint Qualifying"),
+        ("Sprint", "Sprint"),
+        ("Qualifying", "Qualifying"),
+        ("date", "Race"),
+    )
+    for race in races:
+        race_round = str(race["round"])
+        country = race.get("raceName", "F1").replace(" Grand Prix", "")
+        meeting_key = f"jolpica:{YEAR}:{race_round}"
+        for field, session_name in session_fields:
+            value = race.get(field)
+            if not value:
+                continue
+            date = value if isinstance(value, str) else value.get("date")
+            if not date:
+                continue
+            time_value = value.get("time") if isinstance(value, dict) else race.get("time")
+            start = parse_time(f"{date}T{time_value or '12:00:00Z'}")
+            output.append({
+                "meeting_key": meeting_key,
+                "session_key": f"{meeting_key}:{session_name.lower().replace(' ', '-')}",
+                "session_name": session_name,
+                "country_name": country,
+                "date_start": start.isoformat(),
+                "date_end": (start + timedelta(hours=2)).isoformat(),
+                "source": "jolpica",
+                "round": race_round,
+            })
+    return output
 
 
 def drivers_for(session_key: int) -> dict[int, str]:
@@ -119,6 +174,39 @@ def drivers_for(session_key: int) -> dict[int, str]:
         for row in rows
         if row.get("driver_number") is not None
     }
+
+
+def fallback_results(session: dict) -> tuple[list[dict], dict[int, str]]:
+    """Fetch race/qualifying/sprint results from Jolpica."""
+    endpoint = {"Race": "results", "Qualifying": "qualifying", "Sprint": "sprint"}.get(session["session_name"])
+    if not endpoint:
+        return [], {}
+    payload = jolpica_get(f"{YEAR}/{session['round']}/{endpoint}.json")
+    races = payload.get("MRData", {}).get("RaceTable", {}).get("Races", [])
+    if not races:
+        return [], {}
+    rows = races[0].get("Results") or races[0].get("QualifyingResults") or races[0].get("SprintResults") or []
+    results, drivers = [], {}
+    for row in rows:
+        driver = row.get("Driver", {})
+        number = int(row.get("number", 0))
+        drivers[number] = " ".join(filter(None, [driver.get("givenName"), driver.get("familyName")])) or str(number)
+        position = row.get("position")
+        try:
+            position = int(position)
+        except (TypeError, ValueError):
+            position = None
+        status = row.get("status")
+        results.append({
+            "driver_number": number,
+            "position": position,
+            "status": status,
+            "dnf": status not in {None, "Finished"} and not position,
+            "dsq": status == "Disqualified",
+            "dns": status == "Did not start",
+            "gap_to_leader": None,
+        })
+    return results, drivers
 
 
 def session_label(session: dict) -> str:
@@ -211,14 +299,18 @@ def main() -> None:
         if key in sent:
             continue
         try:
-            results = api_get("session_result", session_key=item["session_key"])
+            if item.get("source") == "jolpica":
+                results, drivers = fallback_results(item)
+            else:
+                results = api_get("session_result", session_key=item["session_key"])
+                drivers = drivers_for(item["session_key"])
         except requests.RequestException as error:
             print(f"Result not available yet for {session_label(item)}: {error}")
             continue
         if not results:
             print(f"Result not available yet for {session_label(item)}")
             continue
-        notify(format_result(item, results, drivers_for(item["session_key"])), f"F1 result — {item['session_name']}")
+        notify(format_result(item, results, drivers), f"F1 result — {item['session_name']}")
         sent[key] = now.isoformat()
 
     # Keep the state compact while retaining a month of deduplication history.

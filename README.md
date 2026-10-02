@@ -13,19 +13,19 @@ not an F1 API or ntfy configuration error.
 
 - **Race schedules:** ntfy messages list Grand Prix races in the next 30, 14, and 7 days. A window is updated when a newly scheduled race first appears within it; each meeting is announced once per window.
 - **Morning reminder:** one message on the user's local calendar day listing that day's Sprint, Qualifying, and Race sessions.
-- **Results:** one message per Practice, Sprint, Qualifying, and Race session after OpenF1 publishes the final session result. If a result is not available yet, the next cron run retries it.
+- **Results:** one message per Practice, Sprint, Qualifying, and Race session after OpenF1 publishes the final session result. If a result is not available yet, the next cron run retries it. Jolpica can provide fallback Race, Qualifying, and Sprint results.
 - **Deduplication:** sent-message state is stored in `f1-race-notifier/state.json` inside the shared Backblaze B2 bucket.
 
 Results are intentionally limited to the top 10 entries in the notification to keep ntfy messages readable; the source API remains available for the complete result set.
 
 The OpenF1 client retries temporary `401`, `408`, `425`, `429`, `5xx`, timeout, and connection
-errors. If the sessions endpoint remains unavailable for a poll, the run exits successfully
-without changing deduplication state; the next cron poll retries instead of creating a chain of
-failed cron executions.
+errors. If the sessions endpoint remains unavailable, Jolpica is queried automatically. If both
+sources are unavailable for a poll, the run exits successfully without changing deduplication
+state; the next cron poll retries instead of creating a chain of failed cron executions.
 
 ## Data source
 
-The notifier uses [OpenF1](https://openf1.org/), a public Formula 1 data API. It provides session schedules and session results for practice, qualifying, sprint, and race sessions. OpenF1 documents a free tier with no API key, historical data from 2023 onward, and a limit of 30 requests per minute. A five-minute cron interval stays comfortably below that limit for normal use.
+The notifier uses [OpenF1](https://openf1.org/) as its primary public Formula 1 data API. It provides session schedules and session results for practice, qualifying, sprint, and race sessions. If OpenF1 is unavailable, the notifier falls back to the [Jolpica/Ergast-compatible API](https://jolpi.ca/) for the race calendar and Race, Qualifying, and Sprint results. Jolpica does not provide the same practice-session result coverage, so practice-result alerts remain dependent on OpenF1. OpenF1 documents a free tier with no API key, historical data from 2023 onward, and a limit of 30 requests per minute. A five-minute cron interval stays comfortably below that limit for normal use.
 
 OpenF1 is an independent, community-operated project and is not affiliated with Formula 1, FIA, or Formula One Management. Data can appear a few minutes after official results are published.
 
