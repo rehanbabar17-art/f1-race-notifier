@@ -210,12 +210,32 @@ def drivers_for(session_key: int) -> dict[int, str]:
     }
 
 
+def jolpica_round_for(session: dict) -> str | None:
+    """Find a Jolpica round for a schedule row that came from OpenF1."""
+    try:
+        payload = jolpica_get(f"{YEAR}.json")
+    except requests.RequestException:
+        return None
+    target_date = str(session.get("date_start", ""))[:10]
+    target_country = str(session.get("country_name", "")).lower()
+    races = payload.get("MRData", {}).get("RaceTable", {}).get("Races", [])
+    for race in races:
+        race_date = str(race.get("date", ""))[:10]
+        race_name = race.get("raceName", "").replace(" Grand Prix", "").lower()
+        if (target_date and race_date == target_date) or (target_country and target_country in race_name):
+            return str(race.get("round"))
+    return None
+
+
 def fallback_results(session: dict) -> tuple[list[dict], dict[int, str]]:
     """Fetch race/qualifying/sprint results from Jolpica."""
     endpoint = {"Race": "results", "Qualifying": "qualifying", "Sprint": "sprint"}.get(session["session_name"])
     if not endpoint:
         return [], {}
-    payload = jolpica_get(f"{YEAR}/{session['round']}/{endpoint}.json")
+    round_number = session.get("round") or jolpica_round_for(session)
+    if not round_number:
+        return [], {}
+    payload = jolpica_get(f"{YEAR}/{round_number}/{endpoint}.json")
     races = payload.get("MRData", {}).get("RaceTable", {}).get("Races", [])
     if not races:
         return [], {}
@@ -339,8 +359,32 @@ def official_fastest_laps(session: dict) -> dict[int, str]:
         return {}
 
 
+def openf1_fastest_laps(session: dict) -> dict[int, float]:
+    """Compute each driver's fastest completed lap from OpenF1 lap records."""
+    try:
+        rows = api_get("laps", session_key=session["session_key"])
+    except (requests.RequestException, KeyError, TypeError, ValueError):
+        return {}
+    fastest = {}
+    for row in rows:
+        number = row.get("driver_number")
+        duration = row.get("lap_duration")
+        if number is None or duration in {None, ""} or row.get("is_pit_out_lap"):
+            continue
+        try:
+            duration = float(duration)
+            number = int(number)
+        except (TypeError, ValueError):
+            continue
+        if duration > 0 and (number not in fastest or duration < fastest[number]):
+            fastest[number] = duration
+    return fastest
+
+
 def attach_official_fastest_laps(session: dict, results: list[dict]) -> list[dict]:
     official_fastest = official_fastest_laps(session)
+    if not official_fastest:
+        official_fastest = openf1_fastest_laps(session)
     if not official_fastest and session.get("session_name") in {"Race", "Qualifying", "Sprint"}:
         try:
             fallback, _ = fallback_results(session)

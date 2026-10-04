@@ -74,6 +74,20 @@ class ScheduleTests(unittest.TestCase):
         self.assertIn("Max Verstappen", message)
         self.assertNotIn("MAX VERSTAPPEN", message)
 
+    def test_openf1_lap_fallback_marks_fastest_driver(self):
+        session = {"session_key": 123, "session_name": "Race", "country_name": "Bahrain"}
+        results = [
+            {"driver_number": 1, "position": 1, "lap_time": "1:30.000"},
+            {"driver_number": 2, "position": 2, "lap_time": "1:31.000"},
+        ]
+        with (
+            patch.object(notifier, "official_fastest_laps", return_value={}),
+            patch.object(notifier, "openf1_fastest_laps", return_value={1: 90.1, 2: 90.5}),
+        ):
+            enriched = notifier.attach_official_fastest_laps(session, results)
+        self.assertEqual(enriched[0]["fastest_lap"], 90.1)
+        self.assertEqual(enriched[1]["fastest_lap"], 90.5)
+
     def test_result_notification_skips_previously_sent_chunks(self):
         message = "🏁 result\n\n" + "\n".join(f"  {i}. Driver {i}" for i in range(1, 8))
         sent = {"result:test:part:1": NOW.isoformat()}
