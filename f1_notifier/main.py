@@ -197,6 +197,15 @@ def fallback_results(session: dict) -> tuple[list[dict], dict[int, str]]:
         except (TypeError, ValueError):
             position = None
         status = row.get("status")
+        race_time = row.get("Time", {}).get("time")
+        fastest_lap = row.get("FastestLap", {}).get("Time", {}).get("time")
+        if session["session_name"] == "Qualifying":
+            qualifying_time = next(
+                (row.get(key, {}).get("time") for key in ("Q3", "Q2", "Q1") if row.get(key)),
+                None,
+            )
+        else:
+            qualifying_time = None
         results.append({
             "driver_number": number,
             "position": position,
@@ -204,13 +213,31 @@ def fallback_results(session: dict) -> tuple[list[dict], dict[int, str]]:
             "dnf": status not in {None, "Finished"} and not position,
             "dsq": status == "Disqualified",
             "dns": status == "Did not start",
-            "gap_to_leader": None,
+            "lap_time": qualifying_time or race_time,
+            "gap_to_leader": 0 if position == 1 else race_time if isinstance(race_time, str) and race_time.startswith("+") else None,
+            "fastest_lap": fastest_lap,
         })
     return results, drivers
 
 
 def session_label(session: dict) -> str:
     return f"{session['country_name']} GP — {session['session_name']}"
+
+
+def normalize_results(results: list[dict]) -> list[dict]:
+    """Map OpenF1's result-time variants to the formatter's canonical fields."""
+    normalized = []
+    for row in results:
+        item = dict(row)
+        item.setdefault(
+            "lap_time",
+            next(
+                (item.get(field) for field in ("lap_time", "lap_duration", "duration", "time") if item.get(field) is not None),
+                None,
+            ),
+        )
+        normalized.append(item)
+    return normalized
 
 
 def format_schedule(upcoming: list[dict], days: int) -> str:
@@ -236,20 +263,70 @@ def format_day_reminder(items: list[dict], now: datetime) -> str:
     return "\n".join(lines)
 
 
+def format_time(value) -> str:
+    """Render numeric seconds or an API time string without losing precision."""
+    if value is None or value == "":
+        return "—"
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+        if seconds >= 3600:
+            hours, remainder = divmod(seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            return f"{int(hours)}:{int(minutes):02d}:{seconds:06.3f}"
+        minutes, seconds = divmod(seconds, 60)
+        return f"{int(minutes)}:{seconds:06.3f}"
+    return str(value)
+
+
 def format_result(session: dict, results: list[dict], drivers: dict[int, str]) -> str:
-    top = sorted(results, key=lambda row: row.get("position") or 999)[:10]
+    ordered = sorted(results, key=lambda row: row.get("position") or 999)
     lines = [f"🏁 {session_label(session)} — result", ""]
-    for row in top:
+    for row in ordered:
         number = int(row.get("driver_number", 0))
         name = drivers.get(number, f"Driver {number}")
         position = row.get("position", "—")
         status = "DSQ" if row.get("dsq") else "DNF" if row.get("dnf") else "DNS" if row.get("dns") else str(position)
         gap = row.get("gap_to_leader")
-        suffix = f" (+{gap}s)" if isinstance(gap, (int, float)) and gap else ""
-        lines.append(f"  {status}. {name}{suffix}")
-    if len(results) > 10:
-        lines.append(f"  … plus {len(results) - 10} more classified entries")
+        if isinstance(gap, (int, float)):
+            gap_text = "0.000s" if not gap else f"+{gap:.3f}s"
+        else:
+            gap_text = str(gap) if gap else "—"
+        fastest = row.get("fastest_lap")
+        fastest_text = f"; FL {format_time(fastest)}" if fastest else ""
+        lines.append(
+            f"  {status}. {name} — time {format_time(row.get('lap_time'))}"
+            f" — Δ leader {gap_text}{fastest_text}"
+        )
     return "\n".join(lines)
+
+
+NTFY_BODY_LIMIT = 3500
+
+
+def split_notification(message: str, limit: int = NTFY_BODY_LIMIT) -> list[str]:
+    """Split on complete driver lines while staying below ntfy's body limit."""
+    if len(message.encode("utf-8")) <= limit:
+        return [message]
+    lines = message.splitlines()
+    chunks, current = [], []
+    current_size = 0
+    for line in lines:
+        line_size = len((line + "\n").encode("utf-8"))
+        if current and current_size + line_size > limit:
+            chunks.append("\n".join(current))
+            current, current_size = [], 0
+        current.append(line)
+        current_size += line_size
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
+def notify_result(message: str, title: str) -> None:
+    chunks = split_notification(message)
+    for index, chunk in enumerate(chunks, 1):
+        chunk_title = f"{title} ({index}/{len(chunks)})" if len(chunks) > 1 else title
+        notify(chunk, chunk_title)
 
 
 def main() -> None:
@@ -310,7 +387,8 @@ def main() -> None:
         if not results:
             print(f"Result not available yet for {session_label(item)}")
             continue
-        notify(format_result(item, results, drivers), f"F1 result — {item['session_name']}")
+        results = normalize_results(results)
+        notify_result(format_result(item, results, drivers), f"F1 result — {item['session_name']}")
         sent[key] = now.isoformat()
 
     # Keep the state compact while retaining a month of deduplication history.
