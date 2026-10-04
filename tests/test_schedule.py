@@ -57,11 +57,11 @@ class ScheduleTests(unittest.TestCase):
         ]
         drivers = {number: f"Driver {number}" for number in range(1, 23)}
         message = notifier.format_result(session, results, drivers)
-        self.assertEqual(message.count("— time "), 22)
-        self.assertIn("1. Driver 1", message)
-        self.assertIn("22. Driver 22", message)
-        self.assertIn("Δ leader 0.000s", message)
-        self.assertIn("Δ leader +5.500s", message)
+        self.assertEqual(message.count(" — Δ "), 22)
+        self.assertIn("🥇 1. Driver 1 — 1:30:01.000 — Δ 0.000s", message)
+        self.assertIn("🥈 2. Driver 2 — 1:30:02.000 — Δ +0.500s", message)
+        self.assertIn("🥉 3. Driver 3 — 1:30:03.000 — Δ +0.750s", message)
+        self.assertIn("22. Driver 22 — 1:30:22.000 — Δ +5.500s", message)
 
     def test_long_result_is_split_without_dropping_driver_lines(self):
         message = "🏁 test\n\n" + "\n".join(
@@ -80,6 +80,7 @@ class ScheduleTests(unittest.TestCase):
         official = ([{"driver_number": 1, "position": 1, "lap_time": "1:30.000"}], {1: "Driver 1"})
         with (
             patch.object(notifier, "official_livetiming_results", return_value=official) as official_call,
+            patch.object(notifier, "enrich_result_times", return_value=official[0]),
             patch.object(notifier, "api_get") as openf1_call,
             patch.object(notifier, "fallback_results") as jolpica_call,
         ):
