@@ -416,15 +416,13 @@ def format_result(session: dict, results: list[dict], drivers: dict[int, str]) -
             gap_text = str(gap) if gap else "—"
             if gap_text.startswith("+") and not gap_text.endswith("s"):
                 gap_text += "s"
-        fastest = row.get("fastest_lap")
-        fastest_text = f"; FL {format_time(fastest)}" if fastest else ""
         medal = {1: "🥇 ", 2: "🥈 ", 3: "🥉 "}.get(position, "")
         display_time = row.get("result_time")
         if display_time is None:
             display_time = row.get("lap_time")
         lines.append(
             f"  {medal}{status}. {name} — {format_time(display_time)}"
-            f" — Δ {gap_text}{fastest_text}"
+            f" — Δ {gap_text}"
         )
     return "\n".join(lines)
 
