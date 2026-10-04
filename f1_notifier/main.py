@@ -341,6 +341,16 @@ def official_fastest_laps(session: dict) -> dict[int, str]:
 
 def attach_official_fastest_laps(session: dict, results: list[dict]) -> list[dict]:
     official_fastest = official_fastest_laps(session)
+    if not official_fastest and session.get("session_name") in {"Race", "Qualifying", "Sprint"}:
+        try:
+            fallback, _ = fallback_results(session)
+            official_fastest = {
+                int(row["driver_number"]): row["fastest_lap"]
+                for row in fallback
+                if row.get("fastest_lap")
+            }
+        except (requests.RequestException, KeyError, TypeError, ValueError):
+            official_fastest = {}
     if not official_fastest:
         return results
     enriched = []
