@@ -52,6 +52,7 @@ class ScheduleTests(unittest.TestCase):
                 "position": number,
                 "lap_time": 5400 + number,
                 "gap_to_leader": 0 if number == 1 else number * 0.25,
+                "fastest_lap": "1:20.000" if number == 2 else "1:21.000",
             }
             for number in range(22, 0, -1)
         ]
@@ -59,9 +60,29 @@ class ScheduleTests(unittest.TestCase):
         message = notifier.format_result(session, results, drivers)
         self.assertEqual(message.count(" — Δ "), 22)
         self.assertIn("🥇 1. Driver 1 — 1:30:01.000 — Δ 0.000s", message)
-        self.assertIn("🥈 2. Driver 2 — 1:30:02.000 — Δ +0.500s", message)
+        self.assertIn("🥈 2. Driver 2 ⚡ — 1:30:02.000 — Δ +0.500s", message)
         self.assertIn("🥉 3. Driver 3 — 1:30:03.000 — Δ +0.750s", message)
         self.assertIn("22. Driver 22 — 1:30:22.000 — Δ +5.500s", message)
+        self.assertIn("🥈 2. Driver 2 ⚡ — 1:30:02.000 — Δ +0.500s", message)
+
+    def test_result_names_are_normalized_without_uppercase_feed_formatting(self):
+        message = notifier.format_result(
+            {"country_name": "Bahrain", "session_name": "Race"},
+            [{"driver_number": 1, "position": 1, "lap_time": "1:20.000", "gap_to_leader": 0}],
+            {1: "MAX VERSTAPPEN"},
+        )
+        self.assertIn("Max Verstappen", message)
+        self.assertNotIn("MAX VERSTAPPEN", message)
+
+    def test_result_notification_skips_previously_sent_chunks(self):
+        message = "🏁 result\n\n" + "\n".join(f"  {i}. Driver {i}" for i in range(1, 8))
+        sent = {"result:test:part:1": NOW.isoformat()}
+        state = {"sent": sent}
+        calls = []
+        with patch.object(notifier, "notify", side_effect=lambda *args: calls.append(args)):
+            notifier.notify_result(message, "F1 result", sent, "result:test", NOW, state)
+        self.assertEqual(len(calls), len(notifier.split_notification(message)) - 1)
+        self.assertNotIn("result:test:part:1", [args[0] for args in calls])
 
     def test_long_result_is_split_without_dropping_driver_lines(self):
         message = "🏁 test\n\n" + "\n".join(

@@ -181,7 +181,7 @@ def drivers_for(session_key: int) -> dict[int, str]:
     except requests.RequestException:
         return {}
     return {
-        int(row["driver_number"]): row.get("full_name") or row.get("name_acronym") or str(row["driver_number"])
+        int(row["driver_number"]): humanize_name(row.get("full_name") or row.get("name_acronym") or str(row["driver_number"]))
         for row in rows
         if row.get("driver_number") is not None
     }
@@ -201,7 +201,7 @@ def fallback_results(session: dict) -> tuple[list[dict], dict[int, str]]:
     for row in rows:
         driver = row.get("Driver", {})
         number = int(row.get("number", 0))
-        drivers[number] = " ".join(filter(None, [driver.get("givenName"), driver.get("familyName")])) or str(number)
+        drivers[number] = humanize_name(" ".join(filter(None, [driver.get("givenName"), driver.get("familyName")])) or str(number))
         position = row.get("position")
         try:
             position = int(position)
@@ -265,9 +265,8 @@ def official_livetiming_results(session: dict) -> tuple[list[dict], dict[int, st
         except (TypeError, ValueError):
             continue
         driver = driver_rows.get(str(driver_number), {})
-        drivers[driver_number] = (
-            driver.get("FullName") or driver.get("BroadcastName") or str(driver_number)
-        )
+        full_name = " ".join(filter(None, [driver.get("FirstName"), driver.get("LastName")]))
+        drivers[driver_number] = humanize_name(full_name or driver.get("FullName") or driver.get("BroadcastName") or str(driver_number))
         try:
             position = int(row.get("Position"))
         except (TypeError, ValueError):
@@ -346,6 +345,35 @@ def session_label(session: dict) -> str:
     return f"{session['country_name']} GP — {session['session_name']}"
 
 
+def humanize_name(name: str) -> str:
+    """Use normal display casing without preserving feed-specific uppercase names."""
+    return " ".join(part.capitalize() for part in str(name).split())
+
+
+def result_key(session: dict) -> str:
+    """Stable identity shared by OpenF1 and Jolpica schedule representations."""
+    country = "".join(char.lower() if char.isalnum() else "-" for char in session.get("country_name", "f1"))
+    date = str(session.get("date_start", ""))[:10]
+    return f"result:{YEAR}:{country}:{date}:{session['session_name'].lower()}"
+
+
+def time_value(value) -> float | None:
+    """Convert a displayed lap time to seconds for fastest-lap comparison."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        parts = [float(part) for part in value.split(":")]
+        if len(parts) == 2:
+            return parts[0] * 60 + parts[1]
+        if len(parts) == 3:
+            return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    except ValueError:
+        return None
+    return None
+
+
 def normalize_results(results: list[dict]) -> list[dict]:
     """Map OpenF1's result-time variants to the formatter's canonical fields."""
     normalized = []
@@ -403,10 +431,20 @@ def format_time(value) -> str:
 
 def format_result(session: dict, results: list[dict], drivers: dict[int, str]) -> str:
     ordered = sorted(results, key=lambda row: row.get("position") or 999)
+    fastest_values = [
+        (time_value(row.get("fastest_lap")), int(row.get("driver_number", 0)))
+        for row in ordered
+        if time_value(row.get("fastest_lap")) is not None
+    ]
+    fastest_numbers = set()
+    if fastest_values:
+        fastest = min(value for value, _ in fastest_values)
+        fastest_numbers = {number for value, number in fastest_values if abs(value - fastest) < 0.001}
     lines = [f"🏁 {session_label(session)} — result", ""]
     for row in ordered:
         number = int(row.get("driver_number", 0))
-        name = drivers.get(number, f"Driver {number}")
+        name = humanize_name(drivers.get(number, f"Driver {number}"))
+        fastest_marker = " ⚡" if number in fastest_numbers else ""
         position = row.get("position", "—")
         status = "DSQ" if row.get("dsq") else "DNF" if row.get("dnf") else "DNS" if row.get("dns") else str(position)
         gap = row.get("gap_to_leader")
@@ -421,7 +459,7 @@ def format_result(session: dict, results: list[dict], drivers: dict[int, str]) -
         if display_time is None:
             display_time = row.get("lap_time")
         lines.append(
-            f"  {medal}{status}. {name} — {format_time(display_time)}"
+            f"  {medal}{status}. {name}{fastest_marker} — {format_time(display_time)}"
             f" — Δ {gap_text}"
         )
     return "\n".join(lines)
@@ -449,11 +487,25 @@ def split_notification(message: str, limit: int = NTFY_BODY_LIMIT) -> list[str]:
     return chunks
 
 
-def notify_result(message: str, title: str) -> None:
+def notify_result(
+    message: str,
+    title: str,
+    sent: dict | None = None,
+    key: str | None = None,
+    now: datetime | None = None,
+    state: dict | None = None,
+) -> None:
     chunks = split_notification(message)
     for index, chunk in enumerate(chunks, 1):
         chunk_title = f"{title} ({index}/{len(chunks)})" if len(chunks) > 1 else title
+        chunk_key = f"{key}:part:{index}" if key else None
+        if sent is not None and chunk_key in sent:
+            continue
         notify(chunk, chunk_title)
+        if sent is not None and chunk_key:
+            sent[chunk_key] = (now or datetime.now(timezone.utc)).isoformat()
+            if state is not None:
+                save_state(state)
 
 
 def main() -> None:
@@ -480,6 +532,7 @@ def main() -> None:
         notify(format_schedule(window_races, days), f"F1 schedule — next {days} days")
         for meeting_key in pending_meetings:
             sent[f"schedule:{YEAR}:{days}:{meeting_key}"] = now.isoformat()
+        save_state(state)
 
     # One morning reminder for Sprint, Qualifying, and Race sessions on the user's day.
     local_today = now.astimezone(USER_TZ).date()
@@ -493,22 +546,32 @@ def main() -> None:
         if key not in sent:
             notify(format_day_reminder([item for item in today if item["meeting_key"] == meeting_key], now), "F1 sessions today", "high")
             sent[key] = now.isoformat()
+            save_state(state)
 
     # Publish each session result once, retrying naturally until OpenF1 has published it.
     for item in all_sessions:
         ended = parse_time(item["date_end"])
         if ended > now or now - ended > timedelta(days=3):
             continue
-        key = f"result:{item['session_key']}"
-        if key in sent:
+        key = result_key(item)
+        legacy_key = f"result:{item['session_key']}"
+        if key in sent or legacy_key in sent:
             continue
         results, drivers = fetch_results(item)
         if not results:
             print(f"Result not available yet for {session_label(item)}")
             continue
         results = normalize_results(results)
-        notify_result(format_result(item, results, drivers), f"F1 result — {item['session_name']}")
+        notify_result(
+            format_result(item, results, drivers),
+            f"F1 result — {item['session_name']}",
+            sent,
+            key,
+            now,
+            state,
+        )
         sent[key] = now.isoformat()
+        save_state(state)
 
     # Keep the state compact while retaining a month of deduplication history.
     cutoff = now - timedelta(days=35)
