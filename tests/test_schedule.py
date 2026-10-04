@@ -44,6 +44,37 @@ class ScheduleTests(unittest.TestCase):
         self.assertIn("F1 races in the next 14 days", message)
         self.assertIn("Bahrain — Race", message)
 
+    def test_result_includes_all_drivers_times_and_leader_delta(self):
+        session = {"country_name": "Bahrain", "session_name": "Race"}
+        results = [
+            {
+                "driver_number": number,
+                "position": number,
+                "lap_time": 5400 + number,
+                "gap_to_leader": 0 if number == 1 else number * 0.25,
+            }
+            for number in range(22, 0, -1)
+        ]
+        drivers = {number: f"Driver {number}" for number in range(1, 23)}
+        message = notifier.format_result(session, results, drivers)
+        self.assertEqual(message.count("— time "), 22)
+        self.assertIn("1. Driver 1", message)
+        self.assertIn("22. Driver 22", message)
+        self.assertIn("Δ leader 0.000s", message)
+        self.assertIn("Δ leader +5.500s", message)
+
+    def test_long_result_is_split_without_dropping_driver_lines(self):
+        message = "🏁 test\n\n" + "\n".join(
+            f"  {i}. Driver {i} — time 1:22.123 — Δ leader +{i}.123s"
+            for i in range(1, 23)
+        )
+        chunks = notifier.split_notification(message, limit=200)
+        self.assertGreater(len(chunks), 1)
+        combined = "\n".join(chunks)
+        for number in range(1, 23):
+            self.assertEqual(combined.count(f"  {number}. Driver {number}"), 1)
+        self.assertTrue(all(len(chunk.encode("utf-8")) <= 200 for chunk in chunks))
+
     def test_new_race_updates_each_applicable_window_once(self):
         state = {"sent": {}}
         first_race = race(1, "Bahrain", 10)

@@ -16,7 +16,7 @@ not an F1 API or ntfy configuration error.
 - **Results:** one message per Practice, Sprint, Qualifying, and Race session after OpenF1 publishes the final session result. If a result is not available yet, the next cron run retries it. Jolpica can provide fallback Race, Qualifying, and Sprint results.
 - **Deduplication:** sent-message state is stored in `f1-race-notifier/state.json` inside the shared Backblaze B2 bucket.
 
-Results are intentionally limited to the top 10 entries in the notification to keep ntfy messages readable; the source API remains available for the complete result set.
+Results include every driver returned by the source (normally all 20–22 entries), with position, elapsed/result time, delta to the leader, and fastest lap when the API provides it. Long result messages are split into numbered ntfy notifications on driver-line boundaries.
 
 The OpenF1 client retries temporary `401`, `408`, `425`, `429`, `5xx`, timeout, and connection
 errors. If the sessions endpoint remains unavailable, Jolpica is queried automatically. If both
