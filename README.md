@@ -13,7 +13,7 @@ not an F1 API or ntfy configuration error.
 
 - **Race schedules:** ntfy messages list Grand Prix races in the next 30, 14, and 7 days. A window is updated when a newly scheduled race first appears within it; each meeting is announced once per window.
 - **Morning reminder:** one message on the user's local calendar day listing that day's Sprint, Qualifying, and Race sessions.
-- **Results:** one message per Practice, Sprint, Qualifying, and Race session after OpenF1 publishes the final session result. If a result is not available yet, the next cron run retries it. Jolpica can provide fallback Race, Qualifying, and Sprint results.
+- **Results:** one message per Practice, Sprint, Qualifying, and Race session after the session is finalized. The notifier checks the official F1 LiveTiming archive first, then OpenF1, then Jolpica for Race, Qualifying, and Sprint fallback results. If all sources are empty or unavailable, the next cron run retries it.
 - **Deduplication:** sent-message state is stored in `f1-race-notifier/state.json` inside the shared Backblaze B2 bucket.
 
 Results include every driver returned by the source (normally all 20–22 entries), with position, elapsed/result time, delta to the leader, and fastest lap when the API provides it. Long result messages are split into numbered ntfy notifications on driver-line boundaries.
@@ -25,7 +25,9 @@ state; the next cron poll retries instead of creating a chain of failed cron exe
 
 ## Data source
 
-The notifier uses [OpenF1](https://openf1.org/) as its primary public Formula 1 data API. It provides session schedules and session results for practice, qualifying, sprint, and race sessions. If OpenF1 is unavailable, the notifier falls back to the [Jolpica/Ergast-compatible API](https://jolpi.ca/) for the race calendar and Race, Qualifying, and Sprint results. Jolpica does not provide the same practice-session result coverage, so practice-result alerts remain dependent on OpenF1. OpenF1 documents a free tier with no API key, historical data from 2023 onward, and a limit of 30 requests per minute. A five-minute cron interval stays comfortably below that limit for normal use.
+The notifier checks the [official F1 LiveTiming static archive](https://livetiming.formula1.com/static/) first for finalized session positions, gaps, last-lap times, and best-lap times. It then checks [OpenF1](https://openf1.org/) for session results; OpenF1 documents that its `session_result` endpoint may become available a few minutes after the official F1 result. Finally, [Jolpica](https://jolpi.ca/) is used for the race calendar and Race, Qualifying, and Sprint fallback results. Jolpica does not provide the same practice-session result coverage, so practice-result alerts remain dependent on the official archive or OpenF1.
+
+The message `Result not available yet` means the session has ended according to the schedule, but no source has returned a usable finalized result yet. The notifier does not mark the session as sent in that case, so the next five-minute run retries all sources.
 
 OpenF1 is an independent, community-operated project and is not affiliated with Formula 1, FIA, or Formula One Management. Data can appear a few minutes after official results are published.
 

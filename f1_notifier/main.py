@@ -14,6 +14,7 @@ import requests
 
 API = "https://api.openf1.org/v1"
 JOLPICA_API = "https://api.jolpi.ca/ergast/f1"
+F1_LIVETIMING = "https://livetiming.formula1.com/static"
 YEAR = int(os.environ.get("F1_YEAR", datetime.now(timezone.utc).year))
 USER_TZ = ZoneInfo(os.environ.get("USER_TIMEZONE", "Asia/Karachi"))
 STATE_FILE = Path(os.environ.get("F1_STATE_FILE", "/tmp/f1-state.json"))
@@ -61,6 +62,16 @@ def jolpica_get(path: str):
     )
     response.raise_for_status()
     return response.json()
+
+
+def livetiming_get(path: str):
+    response = requests.get(
+        f"{F1_LIVETIMING}/{path.lstrip('/')}",
+        headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+        timeout=20,
+    )
+    response.raise_for_status()
+    return json.loads(response.content.decode("utf-8-sig"))
 
 
 def parse_time(value: str) -> datetime:
@@ -220,6 +231,93 @@ def fallback_results(session: dict) -> tuple[list[dict], dict[int, str]]:
     return results, drivers
 
 
+def official_livetiming_results(session: dict) -> tuple[list[dict], dict[int, str]]:
+    """Read finalized positions and live lap timing from F1's official archive."""
+    try:
+        session_key = int(session["session_key"])
+    except (KeyError, TypeError, ValueError):
+        return [], {}
+    index = livetiming_get(f"{YEAR}/Index.json")
+    official_session = next(
+        (
+            item
+            for meeting in index.get("Meetings", [])
+            for item in meeting.get("Sessions", [])
+            if item.get("Key") == session_key
+        ),
+        None,
+    )
+    if not official_session:
+        return [], {}
+    base = official_session.get("Path")
+    if not base:
+        return [], {}
+    info = livetiming_get(f"{base}SessionInfo.json")
+    if info.get("SessionStatus") not in {"Finalised", "Finalized"}:
+        return [], {}
+    timing = livetiming_get(f"{base}TimingData.json").get("Lines", {})
+    driver_rows = livetiming_get(f"{base}DriverList.json")
+    results, drivers = [], {}
+    for number, row in timing.items():
+        try:
+            driver_number = int(row.get("RacingNumber", number))
+        except (TypeError, ValueError):
+            continue
+        driver = driver_rows.get(str(driver_number), {})
+        drivers[driver_number] = (
+            driver.get("FullName") or driver.get("BroadcastName") or str(driver_number)
+        ).title()
+        try:
+            position = int(row.get("Position"))
+        except (TypeError, ValueError):
+            position = None
+        gap = row.get("GapToLeader") or (0 if position == 1 else None)
+        last_lap = row.get("LastLapTime", {}).get("Value")
+        best_lap = row.get("BestLapTime", {}).get("Value")
+        results.append({
+            "driver_number": driver_number,
+            "position": position,
+            "dnf": bool(row.get("Retired")) and not position,
+            "dsq": False,
+            "dns": False,
+            "lap_time": last_lap,
+            "gap_to_leader": gap,
+            "fastest_lap": best_lap,
+        })
+    return results, drivers
+
+
+def fetch_results(session: dict) -> tuple[list[dict], dict[int, str]]:
+    """Try official timing first, then OpenF1, then Jolpica."""
+    errors = []
+    try:
+        results, drivers = official_livetiming_results(session)
+        if results:
+            return results, drivers
+    except (requests.RequestException, KeyError, TypeError, ValueError) as error:
+        errors.append(f"official F1 LiveTiming: {error}")
+    try:
+        if session.get("source") == "jolpica":
+            results, drivers = fallback_results(session)
+        else:
+            results = api_get("session_result", session_key=session["session_key"])
+            drivers = drivers_for(session["session_key"])
+        if results:
+            return results, drivers
+    except (requests.RequestException, KeyError, TypeError, ValueError) as error:
+        errors.append(f"OpenF1/Jolpica: {error}")
+    if session.get("source") != "jolpica" and session.get("session_name") in {"Race", "Qualifying", "Sprint"}:
+        try:
+            results, drivers = fallback_results(session)
+            if results:
+                return results, drivers
+        except (requests.RequestException, KeyError, TypeError, ValueError) as error:
+            errors.append(f"Jolpica fallback: {error}")
+    if errors:
+        print(f"No result source available for {session_label(session)}; " + " | ".join(errors))
+    return [], {}
+
+
 def session_label(session: dict) -> str:
     return f"{session['country_name']} GP — {session['session_name']}"
 
@@ -375,15 +473,7 @@ def main() -> None:
         key = f"result:{item['session_key']}"
         if key in sent:
             continue
-        try:
-            if item.get("source") == "jolpica":
-                results, drivers = fallback_results(item)
-            else:
-                results = api_get("session_result", session_key=item["session_key"])
-                drivers = drivers_for(item["session_key"])
-        except requests.RequestException as error:
-            print(f"Result not available yet for {session_label(item)}: {error}")
-            continue
+        results, drivers = fetch_results(item)
         if not results:
             print(f"Result not available yet for {session_label(item)}")
             continue
