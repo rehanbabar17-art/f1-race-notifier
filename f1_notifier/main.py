@@ -225,6 +225,7 @@ def fallback_results(session: dict) -> tuple[list[dict], dict[int, str]]:
             "dsq": status == "Disqualified",
             "dns": status == "Did not start",
             "lap_time": qualifying_time or race_time,
+            "result_time": qualifying_time or race_time,
             "gap_to_leader": 0 if position == 1 else race_time if isinstance(race_time, str) and race_time.startswith("+") else None,
             "fastest_lap": fastest_lap,
         })
@@ -266,7 +267,7 @@ def official_livetiming_results(session: dict) -> tuple[list[dict], dict[int, st
         driver = driver_rows.get(str(driver_number), {})
         drivers[driver_number] = (
             driver.get("FullName") or driver.get("BroadcastName") or str(driver_number)
-        ).title()
+        )
         try:
             position = int(row.get("Position"))
         except (TypeError, ValueError):
@@ -281,10 +282,33 @@ def official_livetiming_results(session: dict) -> tuple[list[dict], dict[int, st
             "dsq": False,
             "dns": False,
             "lap_time": last_lap,
+            "result_time": None,
             "gap_to_leader": gap,
             "fastest_lap": best_lap,
         })
     return results, drivers
+
+
+def enrich_result_times(session: dict, results: list[dict]) -> list[dict]:
+    """Add total session durations when the fast official feed omits them."""
+    try:
+        rows = api_get("session_result", session_key=session["session_key"])
+    except (requests.RequestException, KeyError, TypeError, ValueError):
+        return results
+    by_driver = {int(row["driver_number"]): row for row in rows if row.get("driver_number") is not None}
+    enriched = []
+    for result in results:
+        item = dict(result)
+        source = by_driver.get(int(item["driver_number"]))
+        if source:
+            result_time = source.get("duration")
+            if isinstance(result_time, list):
+                result_time = next((value for value in reversed(result_time) if value is not None), None)
+            item["result_time"] = result_time
+            if item.get("gap_to_leader") in {None, ""}:
+                item["gap_to_leader"] = source.get("gap_to_leader")
+        enriched.append(item)
+    return enriched
 
 
 def fetch_results(session: dict) -> tuple[list[dict], dict[int, str]]:
@@ -293,7 +317,7 @@ def fetch_results(session: dict) -> tuple[list[dict], dict[int, str]]:
     try:
         results, drivers = official_livetiming_results(session)
         if results:
-            return results, drivers
+            return enrich_result_times(session, results), drivers
     except (requests.RequestException, KeyError, TypeError, ValueError) as error:
         errors.append(f"official F1 LiveTiming: {error}")
     try:
@@ -334,6 +358,7 @@ def normalize_results(results: list[dict]) -> list[dict]:
                 None,
             ),
         )
+        item.setdefault("result_time", item.get("duration"))
         normalized.append(item)
     return normalized
 
@@ -389,11 +414,17 @@ def format_result(session: dict, results: list[dict], drivers: dict[int, str]) -
             gap_text = "0.000s" if not gap else f"+{gap:.3f}s"
         else:
             gap_text = str(gap) if gap else "—"
+            if gap_text.startswith("+") and not gap_text.endswith("s"):
+                gap_text += "s"
         fastest = row.get("fastest_lap")
         fastest_text = f"; FL {format_time(fastest)}" if fastest else ""
+        medal = {1: "🥇 ", 2: "🥈 ", 3: "🥉 "}.get(position, "")
+        display_time = row.get("result_time")
+        if display_time is None:
+            display_time = row.get("lap_time")
         lines.append(
-            f"  {status}. {name} — time {format_time(row.get('lap_time'))}"
-            f" — Δ leader {gap_text}{fastest_text}"
+            f"  {medal}{status}. {name} — {format_time(display_time)}"
+            f" — Δ {gap_text}{fastest_text}"
         )
     return "\n".join(lines)
 
