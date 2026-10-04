@@ -75,6 +75,33 @@ class ScheduleTests(unittest.TestCase):
             self.assertEqual(combined.count(f"  {number}. Driver {number}"), 1)
         self.assertTrue(all(len(chunk.encode("utf-8")) <= 200 for chunk in chunks))
 
+    def test_result_sources_prefer_official_livetiming(self):
+        session = {"session_key": 123, "session_name": "Race", "country_name": "Bahrain"}
+        official = ([{"driver_number": 1, "position": 1, "lap_time": "1:30.000"}], {1: "Driver 1"})
+        with (
+            patch.object(notifier, "official_livetiming_results", return_value=official) as official_call,
+            patch.object(notifier, "api_get") as openf1_call,
+            patch.object(notifier, "fallback_results") as jolpica_call,
+        ):
+            result = notifier.fetch_results(session)
+        self.assertEqual(result, official)
+        official_call.assert_called_once_with(session)
+        openf1_call.assert_not_called()
+        jolpica_call.assert_not_called()
+
+    def test_result_sources_reach_jolpica_when_openf1_is_empty(self):
+        session = {"session_key": 123, "session_name": "Race", "country_name": "Bahrain"}
+        fallback = ([{"driver_number": 1, "position": 1, "lap_time": "1:30.000"}], {1: "Driver 1"})
+        with (
+            patch.object(notifier, "official_livetiming_results", return_value=([], {})),
+            patch.object(notifier, "api_get", return_value=[]),
+            patch.object(notifier, "drivers_for", return_value={}),
+            patch.object(notifier, "fallback_results", return_value=fallback) as jolpica_call,
+        ):
+            result = notifier.fetch_results(session)
+        self.assertEqual(result, fallback)
+        jolpica_call.assert_called_once_with(session)
+
     def test_new_race_updates_each_applicable_window_once(self):
         state = {"sent": {}}
         first_race = race(1, "Bahrain", 10)
