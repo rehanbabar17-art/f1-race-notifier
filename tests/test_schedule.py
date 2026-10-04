@@ -98,19 +98,6 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(len(calls), len(notifier.split_notification(message)) - 1)
         self.assertNotIn("result:test:part:1", [args[0] for args in calls])
 
-    def test_forget_latest_race_result_removes_base_and_split_keys_only(self):
-        older = (NOW - timedelta(minutes=10)).isoformat()
-        latest = (NOW - timedelta(minutes=2)).isoformat()
-        state = {"sent": {
-            "result:2026:bahrain:2026-10-04:race": latest,
-            "result:2026:bahrain:2026-10-04:race:part:1": latest,
-            "result:2026:bahrain:2026-10-04:race:part:2": latest,
-            "result:2026:bahrain:2026-10-04:qualifying": older,
-        }}
-        forgotten = notifier.forget_latest_race_result(state)
-        self.assertEqual(forgotten, "result:2026:bahrain:2026-10-04:race")
-        self.assertEqual(state["sent"], {"result:2026:bahrain:2026-10-04:qualifying": older})
-
     def test_long_result_is_split_without_dropping_driver_lines(self):
         message = "🏁 test\n\n" + "\n".join(
             f"  {i}. Driver {i} — time 1:22.123 — Δ leader +{i}.123s"

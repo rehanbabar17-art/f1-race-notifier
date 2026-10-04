@@ -95,29 +95,6 @@ def save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
-def forget_latest_race_result(state: dict) -> str | None:
-    """Remove the newest result notification and all of its split-part keys."""
-    sent = state.get("sent", {})
-    candidates = {}
-    for key, value in sent.items():
-        if not key.startswith("result:"):
-            continue
-        base_key = key.split(":part:", 1)[0]
-        if base_key.endswith(":race") or base_key.count(":") == 1:
-            try:
-                timestamp = parse_time(sent.get(base_key, value))
-            except (TypeError, ValueError):
-                continue
-            candidates[base_key] = timestamp
-    if not candidates:
-        return None
-    latest_key = max(candidates, key=candidates.get)
-    for key in list(sent):
-        if key == latest_key or key.startswith(f"{latest_key}:part:"):
-            del sent[key]
-    return latest_key
-
-
 def notify(message: str, title: str, priority: str = "default") -> None:
     topic = os.environ.get("NTFY_TOPIC", "").strip()
     if not topic:
@@ -631,13 +608,6 @@ def main() -> None:
     now = datetime.now(timezone.utc)
     state = load_state()
     sent = state["sent"]
-    if os.environ.get("F1_FORGET_LATEST_RACE_RESULT", "").lower() in {"1", "true", "yes"}:
-        forgotten = forget_latest_race_result(state)
-        if forgotten:
-            print(f"Reset result deduplication key: {forgotten}")
-            save_state(state)
-        else:
-            print("No previously sent race result found to reset")
     all_sessions = sessions()
     upcoming_races = [item for item in all_sessions if item["session_name"] == "Race"]
 
