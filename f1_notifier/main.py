@@ -311,8 +311,50 @@ def official_livetiming_results(session: dict) -> tuple[list[dict], dict[int, st
     return results, drivers
 
 
+def official_fastest_laps(session: dict) -> dict[int, str]:
+    """Read per-driver best laps even if the official session is not finalized yet."""
+    try:
+        session_key = int(session["session_key"])
+        index = livetiming_get(f"{YEAR}/Index.json")
+        official_session = next(
+            (
+                item
+                for meeting in index.get("Meetings", [])
+                for item in meeting.get("Sessions", [])
+                if item.get("Key") == session_key
+            ),
+            None,
+        )
+        if not official_session or not official_session.get("Path"):
+            return {}
+        lines = livetiming_get(f"{official_session['Path']}TimingData.json").get("Lines", {})
+        fastest = {}
+        for number, row in lines.items():
+            driver_number = int(row.get("RacingNumber", number))
+            value = row.get("BestLapTime", {}).get("Value")
+            if value:
+                fastest[driver_number] = value
+        return fastest
+    except (requests.RequestException, KeyError, TypeError, ValueError):
+        return {}
+
+
+def attach_official_fastest_laps(session: dict, results: list[dict]) -> list[dict]:
+    official_fastest = official_fastest_laps(session)
+    if not official_fastest:
+        return results
+    enriched = []
+    for result in results:
+        item = dict(result)
+        if not item.get("fastest_lap"):
+            item["fastest_lap"] = official_fastest.get(int(item["driver_number"]))
+        enriched.append(item)
+    return enriched
+
+
 def enrich_result_times(session: dict, results: list[dict]) -> list[dict]:
-    """Add total session durations when the fast official feed omits them."""
+    """Add total session durations and official fastest laps when available."""
+    results = attach_official_fastest_laps(session, results)
     try:
         rows = api_get("session_result", session_key=session["session_key"])
     except (requests.RequestException, KeyError, TypeError, ValueError):
@@ -349,7 +391,7 @@ def fetch_results(session: dict) -> tuple[list[dict], dict[int, str]]:
             results = api_get("session_result", session_key=session["session_key"])
             drivers = drivers_for(session["session_key"])
         if results:
-            return results, drivers
+            return attach_official_fastest_laps(session, results), drivers
     except (requests.RequestException, KeyError, TypeError, ValueError) as error:
         errors.append(f"OpenF1/Jolpica: {error}")
     if session.get("source") != "jolpica" and session.get("session_name") in {"Race", "Qualifying", "Sprint"}:
