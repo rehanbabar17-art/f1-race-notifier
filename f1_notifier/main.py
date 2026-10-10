@@ -585,6 +585,11 @@ def normalize_results(results: list[dict]) -> list[dict]:
     normalized = []
     for row in results:
         item = dict(row)
+        position = item.get("position")
+        try:
+            item["position"] = int(position) if position not in {None, ""} else None
+        except (TypeError, ValueError):
+            item["position"] = None
         item.setdefault(
             "lap_time",
             next(
@@ -636,7 +641,13 @@ def format_time(value) -> str:
 
 
 def format_result(session: dict, results: list[dict], drivers: dict[int, str]) -> str:
-    ordered = sorted(results, key=lambda row: row.get("position") or 999)
+    ordered = sorted(
+        results,
+        key=lambda row: (
+            row.get("position") if isinstance(row.get("position"), int) else 999,
+            str(row.get("driver_number", "")),
+        ),
+    )
     fastest_values = [
         (time_value(row.get("fastest_lap")), int(row.get("driver_number", 0)))
         for row in ordered

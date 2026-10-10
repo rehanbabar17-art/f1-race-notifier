@@ -75,6 +75,20 @@ class ScheduleTests(unittest.TestCase):
         self.assertIn("Max Verstappen", message)
         self.assertNotIn("MAX VERSTAPPEN", message)
 
+    def test_result_formatter_handles_mixed_position_types(self):
+        session = {"country_name": "Singapore", "session_name": "Sprint"}
+        results = [
+            {"driver_number": 2, "position": "2", "lap_time": "1:31.000", "gap_to_leader": 1.0},
+            {"driver_number": 1, "position": 1, "lap_time": "1:30.000", "gap_to_leader": 0},
+        ]
+        message = notifier.format_result(
+            session,
+            notifier.normalize_results(results),
+            {1: "Driver One", 2: "Driver Two"},
+        )
+        self.assertLess(message.index("1. Driver One"), message.index("2. Driver Two"))
+        self.assertIn("🥈 2. Driver Two", message)
+
     def test_openf1_lap_fallback_marks_fastest_driver(self):
         session = {"session_key": 123, "session_name": "Race", "country_name": "Bahrain"}
         results = [
