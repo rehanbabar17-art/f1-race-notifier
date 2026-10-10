@@ -150,6 +150,28 @@ class ScheduleTests(unittest.TestCase):
         ):
             self.assertEqual(notifier.session_result_get(11383), rows)
 
+    def test_fetch_and_format_standings_separately(self):
+        session = {
+            "country_name": "Singapore",
+            "session_name": "Sprint",
+            "round": "16",
+        }
+        payloads = [
+            {"MRData": {"StandingsTable": {"StandingsLists": [{"DriverStandings": [
+                {"position": "1", "points": "320", "Driver": {"givenName": "Max", "familyName": "Verstappen"}},
+            ]}]}}},
+            {"MRData": {"StandingsTable": {"StandingsLists": [{"ConstructorStandings": [
+                {"position": "1", "points": "556", "Constructor": {"name": "Mercedes"}},
+            ]}]}}},
+        ]
+        with patch.object(notifier, "jolpica_get", side_effect=payloads):
+            drivers, constructors = notifier.fetch_standings(session)
+        driver_message, constructor_message = notifier.format_standings(session, drivers, constructors)
+        self.assertIn("Max Verstappen — 320 pts", driver_message)
+        self.assertNotIn("Mercedes", driver_message)
+        self.assertIn("Mercedes — 556 pts", constructor_message)
+        self.assertNotIn("Max Verstappen", constructor_message)
+
     def test_new_race_updates_each_applicable_window_once(self):
         state = {"sent": {}}
         first_race = race(1, "Bahrain", 10)

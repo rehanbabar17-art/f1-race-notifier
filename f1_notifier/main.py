@@ -467,6 +467,102 @@ def result_key(session: dict) -> str:
     return f"result:{YEAR}:{country}:{date}:{session['session_name'].lower()}"
 
 
+def standings_key(session: dict, category: str) -> str:
+    return f"{result_key(session)}:standings:{category}"
+
+
+def openf1_standings(session: dict) -> tuple[list[dict], list[dict]]:
+    """Compute championship standings from completed OpenF1 Race/Sprint points."""
+    session_rows = api_get("sessions", year=YEAR)
+    target_end = str(session.get("date_end", ""))
+    eligible = [
+        row for row in session_rows
+        if row.get("session_name") in {"Race", "Sprint"}
+        and row.get("date_end", "") <= target_end
+    ]
+    metadata = api_get("drivers", session_key=session["session_key"])
+    names = {}
+    teams = {}
+    for row in metadata:
+        number = int(row["driver_number"])
+        names[number] = row.get("full_name") or str(number)
+        teams[number] = row.get("team_name") or "Unknown"
+    points = {number: 0.0 for number in names}
+    for event in eligible:
+        try:
+            result_rows = api_get("session_result", session_key=event["session_key"])
+        except (requests.RequestException, KeyError, TypeError, ValueError):
+            continue
+        for row in result_rows:
+            number = int(row["driver_number"])
+            points[number] = points.get(number, 0.0) + float(row.get("points") or 0)
+    driver_rows = [
+        {
+            "position": position,
+            "points": points_value,
+            "Driver": {
+                "givenName": humanize_name(names.get(number, str(number))).split(" ", 1)[0],
+                "familyName": humanize_name(names.get(number, str(number))).split(" ", 1)[-1],
+            },
+        }
+        for position, (number, points_value) in enumerate(
+            sorted(points.items(), key=lambda item: (-item[1], item[0])), 1
+        )
+    ]
+    constructor_points = {}
+    for number, points_value in points.items():
+        constructor = teams.get(number, "Unknown")
+        constructor_points[constructor] = constructor_points.get(constructor, 0.0) + points_value
+    constructor_rows = [
+        {"position": position, "points": points_value, "Constructor": {"name": name}}
+        for position, (name, points_value) in enumerate(
+            sorted(constructor_points.items(), key=lambda item: (-item[1], item[0])), 1
+        )
+    ]
+    return driver_rows, constructor_rows
+
+
+def fetch_standings(session: dict) -> tuple[list[dict], list[dict]]:
+    """Fetch championship driver and constructor standings after an event."""
+    round_number = session.get("round") or jolpica_round_for(session)
+    if round_number:
+        try:
+            driver_payload = jolpica_get(f"{YEAR}/{round_number}/driverstandings.json")
+            constructor_payload = jolpica_get(f"{YEAR}/{round_number}/constructorstandings.json")
+            driver_lists = driver_payload.get("MRData", {}).get("StandingsTable", {}).get("StandingsLists", [])
+            constructor_lists = constructor_payload.get("MRData", {}).get("StandingsTable", {}).get("StandingsLists", [])
+            drivers = driver_lists[0].get("DriverStandings", []) if driver_lists else []
+            constructors = constructor_lists[0].get("ConstructorStandings", []) if constructor_lists else []
+            if drivers and constructors:
+                return drivers, constructors
+        except (requests.RequestException, KeyError, TypeError, ValueError):
+            pass
+    return openf1_standings(session)
+
+
+def format_standings(session: dict, drivers: list[dict], constructors: list[dict]) -> tuple[str, str]:
+    """Format driver and constructor standings as two separate ntfy bodies."""
+    def points_text(value) -> str:
+        try:
+            number = float(value)
+            return str(int(number)) if number.is_integer() else f"{number:.1f}"
+        except (TypeError, ValueError):
+            return str(value or "0")
+
+    label = session_label(session)
+    driver_lines = [f"🏆 {label} — driver standings", ""]
+    for row in drivers:
+        driver = row.get("Driver", {})
+        name = humanize_name(" ".join(filter(None, [driver.get("givenName"), driver.get("familyName")])) or "Unknown")
+        driver_lines.append(f"  {row.get('position', '—')}. {name} — {points_text(row.get('points'))} pts")
+    constructor_lines = [f"🏆 {label} — constructor standings", ""]
+    for row in constructors:
+        constructor = row.get("Constructor", {})
+        name = constructor.get("name") or "Unknown"
+        constructor_lines.append(f"  {row.get('position', '—')}. {name} — {points_text(row.get('points'))} pts")
+    return "\n".join(driver_lines), "\n".join(constructor_lines)
+
+
 def time_value(value) -> float | None:
     """Convert a displayed lap time to seconds for fastest-lap comparison."""
     if isinstance(value, (int, float)):
@@ -665,23 +761,44 @@ def main() -> None:
             continue
         key = result_key(item)
         legacy_key = f"result:{item['session_key']}"
-        if key in sent or legacy_key in sent:
+        result_already_sent = key in sent or legacy_key in sent
+        if not result_already_sent:
+            results, drivers = fetch_results(item)
+            if not results:
+                print(f"Result not available yet for {session_label(item)}")
+                continue
+            results = normalize_results(results)
+            notify_result(
+                format_result(item, results, drivers),
+                f"F1 result — {item['session_name']}",
+                sent,
+                key,
+                now,
+                state,
+            )
+            sent[key] = now.isoformat()
+            save_state(state)
+        if item["session_name"] not in {"Sprint", "Race"}:
             continue
-        results, drivers = fetch_results(item)
-        if not results:
-            print(f"Result not available yet for {session_label(item)}")
+        try:
+            drivers, constructors = fetch_standings(item)
+        except (requests.RequestException, KeyError, TypeError, ValueError) as error:
+            print(f"Standings not available yet for {session_label(item)}: {error}")
             continue
-        results = normalize_results(results)
-        notify_result(
-            format_result(item, results, drivers),
-            f"F1 result — {item['session_name']}",
-            sent,
-            key,
-            now,
-            state,
-        )
-        sent[key] = now.isoformat()
-        save_state(state)
+        if not drivers or not constructors:
+            print(f"Standings not available yet for {session_label(item)}")
+            continue
+        driver_key = standings_key(item, "drivers")
+        constructor_key = standings_key(item, "constructors")
+        driver_message, constructor_message = format_standings(item, drivers, constructors)
+        if driver_key not in sent:
+            notify_result(driver_message, f"F1 driver standings — {item['session_name']}", sent, driver_key, now, state)
+            sent[driver_key] = now.isoformat()
+            save_state(state)
+        if constructor_key not in sent:
+            notify_result(constructor_message, f"F1 constructor standings — {item['session_name']}", sent, constructor_key, now, state)
+            sent[constructor_key] = now.isoformat()
+            save_state(state)
 
     # Keep the state compact while retaining a month of deduplication history.
     cutoff = now - timedelta(days=35)
