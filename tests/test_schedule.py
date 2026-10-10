@@ -1,6 +1,7 @@
 from datetime import datetime as RealDateTime, timedelta, timezone
 import unittest
 from unittest.mock import patch
+import requests
 
 import f1_notifier.main as notifier
 
@@ -137,6 +138,17 @@ class ScheduleTests(unittest.TestCase):
             result = notifier.fetch_results(session)
         self.assertEqual(result, fallback)
         jolpica_call.assert_called_once_with(session)
+
+    def test_session_result_retries_transient_not_found(self):
+        response = requests.Response()
+        response.status_code = 404
+        error = requests.HTTPError("not published yet", response=response)
+        rows = [{"driver_number": 1, "position": 1}]
+        with (
+            patch.object(notifier, "api_get", side_effect=[error, rows]),
+            patch.object(notifier.time, "sleep"),
+        ):
+            self.assertEqual(notifier.session_result_get(11383), rows)
 
     def test_new_race_updates_each_applicable_window_once(self):
         state = {"sent": {}}

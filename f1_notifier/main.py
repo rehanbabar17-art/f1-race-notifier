@@ -54,6 +54,20 @@ def api_get(path: str, **params):
     raise last_error or RuntimeError(f"OpenF1 request failed: {path}")
 
 
+def session_result_get(session_key: int | str) -> list[dict]:
+    """Retry briefly when OpenF1 has not published a just-finished result yet."""
+    last_error = None
+    for attempt in range(3):
+        try:
+            return api_get("session_result", session_key=session_key)
+        except requests.HTTPError as error:
+            last_error = error
+            if getattr(error.response, "status_code", None) != 404 or attempt == 2:
+                raise
+            time.sleep(5 * (attempt + 1))
+    raise last_error or RuntimeError(f"OpenF1 session result unavailable: {session_key}")
+
+
 def jolpica_get(path: str):
     response = requests.get(
         f"{JOLPICA_API}/{path}",
@@ -387,7 +401,7 @@ def enrich_result_times(session: dict, results: list[dict]) -> list[dict]:
     """Add total session durations and official fastest laps when available."""
     results = attach_official_fastest_laps(session, results)
     try:
-        rows = api_get("session_result", session_key=session["session_key"])
+        rows = session_result_get(session["session_key"])
     except (requests.RequestException, KeyError, TypeError, ValueError):
         return results
     by_driver = {int(row["driver_number"]): row for row in rows if row.get("driver_number") is not None}
@@ -419,7 +433,7 @@ def fetch_results(session: dict) -> tuple[list[dict], dict[int, str]]:
         if session.get("source") == "jolpica":
             results, drivers = fallback_results(session)
         else:
-            results = api_get("session_result", session_key=session["session_key"])
+            results = session_result_get(session["session_key"])
             drivers = drivers_for(session["session_key"])
         if results:
             return attach_official_fastest_laps(session, results), drivers
