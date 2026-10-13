@@ -58,19 +58,11 @@ The B2 object is namespaced as `f1-race-notifier/state.json`. The application ke
 
 ### Configured ntfy topic
 
-A randomized topic has been selected for this notifier:
+The active topic is stored privately in the GitHub Actions secret `NTFY_TOPIC`.
 
-```text
-REDACTED_NTFY_TOPIC
-```
-
-Subscribe to it in the ntfy app or visit:
-
-```text
-https://ntfy.sh/REDACTED_NTFY_TOPIC
-```
-
-Keep this topic private. Anyone who knows a public ntfy topic can publish to it.
+Do not commit or publish the topic. Subscribe to the exact private topic configured in
+that secret from your ntfy app or client. Anyone who discovers a public ntfy topic can
+subscribe to it or publish messages to it.
 
 ## cron-job.org configuration
 
