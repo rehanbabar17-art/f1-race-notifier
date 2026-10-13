@@ -832,15 +832,17 @@ def main() -> None:
             sent[key] = now.isoformat()
             save_state(state)
 
-    # Publish each session result once, retrying naturally until OpenF1 has published it.
+    # Keep the existing three-day result alert window, but retry Sprint/Race
+    # standings for a week so delayed point feeds do not permanently suppress them.
     for item in all_sessions:
         ended = parse_time(item["date_end"])
-        if ended > now or now - ended > timedelta(days=3):
+        if ended > now or now - ended > timedelta(days=7):
             continue
+        result_window_open = now - ended <= timedelta(days=3)
         key = result_key(item)
         legacy_key = f"result:{item['session_key']}"
         result_already_sent = key in sent or legacy_key in sent
-        if not result_already_sent:
+        if not result_already_sent and result_window_open:
             results, drivers = fetch_results(item)
             if not results:
                 print(f"Result not available yet for {session_label(item)}")
@@ -858,6 +860,10 @@ def main() -> None:
             save_state(state)
         if item["session_name"] not in {"Sprint", "Race"}:
             continue
+        driver_key = standings_key(item, "drivers")
+        constructor_key = standings_key(item, "constructors")
+        if driver_key in sent and constructor_key in sent:
+            continue
         try:
             drivers, constructors = fetch_standings(item)
         except (requests.RequestException, KeyError, TypeError, ValueError) as error:
@@ -866,8 +872,6 @@ def main() -> None:
         if not drivers or not constructors:
             print(f"Standings not available yet for {session_label(item)}")
             continue
-        driver_key = standings_key(item, "drivers")
-        constructor_key = standings_key(item, "constructors")
         driver_message, constructor_message = format_standings(item, drivers, constructors)
         if driver_key not in sent:
             notify_result(driver_message, f"F1 driver standings — {item['session_name']}", sent, driver_key, now, state)

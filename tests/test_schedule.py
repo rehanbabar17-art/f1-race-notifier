@@ -246,6 +246,42 @@ class ScheduleTests(unittest.TestCase):
         }, "drivers")
         self.assertIn("verified-points-v2:drivers", key)
 
+    def test_standings_retry_for_seven_days_without_republishing_old_results(self):
+        session = {
+            "meeting_key": 1296,
+            "session_key": 11383,
+            "country_name": "Singapore",
+            "session_name": "Sprint",
+            "date_start": (NOW - timedelta(days=4, hours=1)).isoformat(),
+            "date_end": (NOW - timedelta(days=4)).isoformat(),
+        }
+        state = {"sent": {}}
+        messages = []
+        standings = ([
+            {"position": 1, "points": 8, "Driver": {"givenName": "Max", "familyName": "Verstappen"}},
+        ], [
+            {"position": 1, "points": 8, "Constructor": {"name": "Red Bull"}},
+        ])
+        with (
+            patch.object(notifier, "fetch_standings", return_value=standings) as fetch_standings,
+            patch.object(notifier, "fetch_results") as fetch_results,
+        ):
+            self.run_notifier(state, [session], lambda *args, **kwargs: messages.append(args))
+        fetch_standings.assert_called_once_with(session)
+        fetch_results.assert_not_called()
+        self.assertIn("F1 driver standings — Sprint", [args[1] for args in messages])
+        self.assertIn("F1 constructor standings — Sprint", [args[1] for args in messages])
+
+        messages.clear()
+        with (
+            patch.object(notifier, "fetch_standings") as fetch_standings,
+            patch.object(notifier, "fetch_results") as fetch_results,
+        ):
+            self.run_notifier(state, [session], lambda *args, **kwargs: messages.append(args))
+        fetch_standings.assert_not_called()
+        fetch_results.assert_not_called()
+        self.assertEqual(messages, [])
+
     def test_new_race_updates_each_applicable_window_once(self):
         state = {"sent": {}}
         first_race = race(1, "Bahrain", 10)
