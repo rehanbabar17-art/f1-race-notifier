@@ -468,76 +468,143 @@ def result_key(session: dict) -> str:
 
 
 def standings_key(session: dict, category: str) -> str:
-    return f"{result_key(session)}:standings:{category}"
+    # Version the identity so sessions previously notified from stale tables can
+    # receive one corrected, result-verified standings update.
+    return f"{result_key(session)}:standings:verified-points-v2:{category}"
 
 
-def openf1_standings(session: dict) -> tuple[list[dict], list[dict]]:
-    """Compute championship standings from completed OpenF1 Race/Sprint points."""
-    session_rows = api_get("sessions", year=YEAR)
-    target_end = str(session.get("date_end", ""))
-    eligible = [
-        row for row in session_rows
-        if row.get("session_name") in {"Race", "Sprint"}
-        and row.get("date_end", "") <= target_end
-    ]
-    metadata = api_get("drivers", session_key=session["session_key"])
-    names = {}
-    teams = {}
-    for row in metadata:
-        number = int(row["driver_number"])
-        names[number] = row.get("full_name") or str(number)
-        teams[number] = row.get("team_name") or "Unknown"
-    points = {number: 0.0 for number in names}
-    for event in eligible:
+def jolpica_result_rows(endpoint: str) -> list[tuple[int, dict]]:
+    """Return all season result rows as (round, result) pairs, following pagination."""
+    page_size = 100
+    offset = 0
+    output = []
+    results_field = "Results" if endpoint == "results" else "SprintResults"
+    while True:
+        payload = jolpica_get(f"{YEAR}/{endpoint}.json?limit={page_size}&offset={offset}")
+        data = payload.get("MRData", {})
+        races = data.get("RaceTable", {}).get("Races", [])
+        for race in races:
+            try:
+                round_number = int(race["round"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            output.extend((round_number, row) for row in race.get(results_field, []))
         try:
-            result_rows = api_get("session_result", session_key=event["session_key"])
-        except (requests.RequestException, KeyError, TypeError, ValueError):
+            total = int(data.get("total", 0))
+            limit = int(data.get("limit", page_size))
+        except (TypeError, ValueError):
+            break
+        if not races or offset + limit >= total:
+            break
+        offset += limit
+    return output
+
+
+def jolpica_round_result_rows(round_number: int, endpoint: str) -> list[dict]:
+    """Fetch one round's point-bearing results to check event readiness."""
+    payload = jolpica_get(f"{YEAR}/{round_number}/{endpoint}.json?limit=100")
+    results_field = "Results" if endpoint == "results" else "SprintResults"
+    output = []
+    for race in payload.get("MRData", {}).get("RaceTable", {}).get("Races", []):
+        try:
+            if int(race.get("round", 0)) == round_number:
+                output.extend(race.get(results_field, []))
+        except (TypeError, ValueError):
             continue
-        for row in result_rows:
-            number = int(row["driver_number"])
-            points[number] = points.get(number, 0.0) + float(row.get("points") or 0)
-    driver_rows = [
-        {
-            "position": position,
-            "points": points_value,
-            "Driver": {
-                "givenName": humanize_name(names.get(number, str(number))).split(" ", 1)[0],
-                "familyName": humanize_name(names.get(number, str(number))).split(" ", 1)[-1],
-            },
-        }
-        for position, (number, points_value) in enumerate(
-            sorted(points.items(), key=lambda item: (-item[1], item[0])), 1
-        )
-    ]
-    constructor_points = {}
-    for number, points_value in points.items():
-        constructor = teams.get(number, "Unknown")
-        constructor_points[constructor] = constructor_points.get(constructor, 0.0) + points_value
-    constructor_rows = [
-        {"position": position, "points": points_value, "Constructor": {"name": name}}
-        for position, (name, points_value) in enumerate(
-            sorted(constructor_points.items(), key=lambda item: (-item[1], item[0])), 1
-        )
-    ]
-    return driver_rows, constructor_rows
+    return output
 
 
 def fetch_standings(session: dict) -> tuple[list[dict], list[dict]]:
-    """Fetch championship driver and constructor standings after an event."""
-    round_number = session.get("round") or jolpica_round_for(session)
-    if round_number:
+    """Calculate standings from point-bearing event results through this session."""
+    try:
+        round_number = int(session.get("round") or jolpica_round_for(session) or 0)
+    except (TypeError, ValueError):
+        round_number = 0
+    if not round_number or session.get("session_name") not in {"Sprint", "Race"}:
+        return [], []
+
+    session_name = session["session_name"]
+    current_endpoint = "sprint" if session_name == "Sprint" else "results"
+    current_event_rows = jolpica_round_result_rows(round_number, current_endpoint)
+    if (
+        len(current_event_rows) < 18
+        or any(row.get("points") in {None, ""} for row in current_event_rows)
+    ):
+        return [], []
+
+    race_rows = jolpica_result_rows("results")
+    sprint_rows = jolpica_result_rows("sprint")
+    current_season_rows = [
+        row for round_id, row in (sprint_rows if session_name == "Sprint" else race_rows)
+        if round_id == round_number
+    ]
+    # The season-wide endpoints can lag the round endpoint. Wait for both to
+    # agree that the current event's point-bearing results are present.
+    if (
+        len(current_season_rows) < 18
+        or any(row.get("points") in {None, ""} for row in current_season_rows)
+    ):
+        return [], []
+
+    driver_totals: dict[str, dict] = {}
+    constructor_totals: dict[str, dict] = {}
+    included_rows = []
+    included_rows.extend(
+        (round_id, "Race", row) for round_id, row in race_rows
+        if round_id < round_number or (round_id == round_number and session_name == "Race")
+    )
+    included_rows.extend(
+        (round_id, "Sprint", row) for round_id, row in sprint_rows
+        if round_id <= round_number
+    )
+    if any(row.get("points") in {None, ""} for _round_id, _kind, row in included_rows):
+        return [], []
+
+    for _round_id, kind, row in included_rows:
+        driver = row.get("Driver", {})
+        constructor = row.get("Constructor", {})
+        driver_id = driver.get("driverId") or driver.get("permanentNumber") or row.get("number")
+        constructor_id = constructor.get("constructorId") or constructor.get("name")
+        if not driver_id or not constructor_id:
+            continue
         try:
-            driver_payload = jolpica_get(f"{YEAR}/{round_number}/driverstandings.json")
-            constructor_payload = jolpica_get(f"{YEAR}/{round_number}/constructorstandings.json")
-            driver_lists = driver_payload.get("MRData", {}).get("StandingsTable", {}).get("StandingsLists", [])
-            constructor_lists = constructor_payload.get("MRData", {}).get("StandingsTable", {}).get("StandingsLists", [])
-            drivers = driver_lists[0].get("DriverStandings", []) if driver_lists else []
-            constructors = constructor_lists[0].get("ConstructorStandings", []) if constructor_lists else []
-            if drivers and constructors:
-                return drivers, constructors
-        except (requests.RequestException, KeyError, TypeError, ValueError):
-            pass
-    return openf1_standings(session)
+            points = float(row.get("points") or 0)
+        except (TypeError, ValueError):
+            return [], []
+        driver_id = str(driver_id)
+        constructor_id = str(constructor_id)
+        driver_entry = driver_totals.setdefault(driver_id, {"Driver": driver, "points": 0.0, "wins": 0})
+        driver_entry["points"] += points
+        constructor_entry = constructor_totals.setdefault(
+            constructor_id,
+            {"Constructor": constructor, "points": 0.0, "wins": 0},
+        )
+        constructor_entry["points"] += points
+        if kind == "Race" and str(row.get("position")) == "1":
+            driver_entry["wins"] += 1
+            constructor_entry["wins"] += 1
+
+    driver_sorted = sorted(
+        driver_totals.values(),
+        key=lambda row: (-row["points"], -row["wins"], row["Driver"].get("driverId", "")),
+    )
+    constructor_sorted = sorted(
+        constructor_totals.values(),
+        key=lambda row: (-row["points"], -row["wins"], row["Constructor"].get("constructorId", "")),
+    )
+    driver_rows = [
+        {"position": position, "points": row["points"], "Driver": row["Driver"]}
+        for position, row in enumerate(driver_sorted, 1)
+    ]
+    constructor_rows = [
+        {"position": position, "points": row["points"], "Constructor": row["Constructor"]}
+        for position, row in enumerate(constructor_sorted, 1)
+    ]
+    print(
+        f"Calculated standings through round {round_number} {session_name.lower()}: "
+        f"{len(driver_rows)} drivers, {len(constructor_rows)} constructors"
+    )
+    return driver_rows, constructor_rows
 
 
 def format_standings(session: dict, drivers: list[dict], constructors: list[dict]) -> tuple[str, str]:

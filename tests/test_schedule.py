@@ -28,6 +28,16 @@ def race(meeting_key, country, days):
     }
 
 
+def points_row(driver_id, driver_name, constructor_id, constructor_name, points, position):
+    given, family = driver_name.split(" ", 1)
+    return {
+        "points": str(points),
+        "position": str(position),
+        "Driver": {"driverId": driver_id, "givenName": given, "familyName": family},
+        "Constructor": {"constructorId": constructor_id, "name": constructor_name},
+    }
+
+
 class ScheduleTests(unittest.TestCase):
     def run_notifier(self, state, races, notify):
         with (
@@ -164,27 +174,77 @@ class ScheduleTests(unittest.TestCase):
         ):
             self.assertEqual(notifier.session_result_get(11383), rows)
 
-    def test_fetch_and_format_standings_separately(self):
-        session = {
-            "country_name": "Singapore",
-            "session_name": "Sprint",
-            "round": "16",
-        }
-        payloads = [
-            {"MRData": {"StandingsTable": {"StandingsLists": [{"DriverStandings": [
-                {"position": "1", "points": "320", "Driver": {"givenName": "Max", "familyName": "Verstappen"}},
-            ]}]}}},
-            {"MRData": {"StandingsTable": {"StandingsLists": [{"ConstructorStandings": [
-                {"position": "1", "points": "556", "Constructor": {"name": "Mercedes"}},
-            ]}]}}},
+    def standings_fixtures(self):
+        race_rows = [
+            (1, points_row("max", "Max Verstappen", "rb", "Red Bull", 25, 1)),
+            (1, points_row("lewis", "Lewis Hamilton", "ferrari", "Ferrari", 18, 2)),
+            (2, points_row("lewis", "Lewis Hamilton", "ferrari", "Ferrari", 25, 1)),
+            (2, points_row("max", "Max Verstappen", "rb", "Red Bull", 18, 2)),
+            # This race happened after the Sprint in round 3 and must be excluded
+            # from Sprint standings, but included in round-3 Race standings.
+            (3, points_row("max", "Max Verstappen", "rb", "Red Bull", 25, 1)),
+            (3, points_row("lewis", "Lewis Hamilton", "ferrari", "Ferrari", 18, 2)),
         ]
-        with patch.object(notifier, "jolpica_get", side_effect=payloads):
+        sprint_rows = [
+            (2, points_row("lewis", "Lewis Hamilton", "ferrari", "Ferrari", 8, 1)),
+            (2, points_row("max", "Max Verstappen", "rb", "Red Bull", 7, 2)),
+            (3, points_row("max", "Max Verstappen", "rb", "Red Bull", 8, 1)),
+            (3, points_row("lewis", "Lewis Hamilton", "ferrari", "Ferrari", 7, 2)),
+        ]
+        for index in range(16):
+            dummy = points_row(f"extra-{index}", f"Extra Driver{index}", "other", "Other", 0, index + 3)
+            race_rows.append((3, dummy))
+            sprint_rows.append((3, dummy))
+        return race_rows, sprint_rows
+
+    def test_standings_include_sprint_points_but_not_later_same_round_race(self):
+        race_rows, sprint_rows = self.standings_fixtures()
+        session = {"country_name": "Singapore", "session_name": "Sprint", "round": "3"}
+        with (
+            patch.object(notifier, "jolpica_round_result_rows", return_value=[row for round_id, row in sprint_rows if round_id == 3]),
+            patch.object(notifier, "jolpica_result_rows", side_effect=[race_rows, sprint_rows]),
+        ):
             drivers, constructors = notifier.fetch_standings(session)
-        driver_message, constructor_message = notifier.format_standings(session, drivers, constructors)
-        self.assertIn("Max Verstappen — 320 pts", driver_message)
-        self.assertNotIn("Mercedes", driver_message)
-        self.assertIn("Mercedes — 556 pts", constructor_message)
-        self.assertNotIn("Max Verstappen", constructor_message)
+        driver_points = {row["Driver"]["driverId"]: row["points"] for row in drivers}
+        constructor_points = {row["Constructor"]["constructorId"]: row["points"] for row in constructors}
+        self.assertEqual(driver_points["max"], 58.0)
+        self.assertEqual(driver_points["lewis"], 58.0)
+        self.assertEqual(constructor_points["rb"], 58.0)
+        self.assertEqual(constructor_points["ferrari"], 58.0)
+
+    def test_race_standings_include_current_round_sprint_and_race_points(self):
+        race_rows, sprint_rows = self.standings_fixtures()
+        session = {"country_name": "Singapore", "session_name": "Race", "round": "3"}
+        with (
+            patch.object(notifier, "jolpica_round_result_rows", return_value=[row for round_id, row in race_rows if round_id == 3]),
+            patch.object(notifier, "jolpica_result_rows", side_effect=[race_rows, sprint_rows]),
+        ):
+            drivers, constructors = notifier.fetch_standings(session)
+        driver_points = {row["Driver"]["driverId"]: row["points"] for row in drivers}
+        constructor_points = {row["Constructor"]["constructorId"]: row["points"] for row in constructors}
+        self.assertEqual(driver_points["max"], 83.0)
+        self.assertEqual(driver_points["lewis"], 76.0)
+        self.assertEqual(constructor_points["rb"], 83.0)
+        self.assertEqual(constructor_points["ferrari"], 76.0)
+
+    def test_standings_wait_until_current_event_points_are_available(self):
+        race_rows, sprint_rows = self.standings_fixtures()
+        race_rows = [(round_id, row) for round_id, row in race_rows if round_id < 3]
+        session = {"country_name": "Singapore", "session_name": "Race", "round": "3"}
+        with (
+            patch.object(notifier, "jolpica_round_result_rows", return_value=[]),
+            patch.object(notifier, "jolpica_result_rows") as season_rows,
+        ):
+            self.assertEqual(notifier.fetch_standings(session), ([], []))
+        season_rows.assert_not_called()
+
+    def test_standings_key_uses_verified_points_version(self):
+        key = notifier.standings_key({
+            "country_name": "Singapore",
+            "session_name": "Race",
+            "date_start": "2026-10-11T12:00:00+00:00",
+        }, "drivers")
+        self.assertIn("verified-points-v2:drivers", key)
 
     def test_new_race_updates_each_applicable_window_once(self):
         state = {"sent": {}}
