@@ -21,6 +21,38 @@ STATE_FILE = Path(os.environ.get("F1_STATE_FILE", "/tmp/f1-state.json"))
 USER_AGENT = "F1RaceNotifier/1.0 (+https://github.com/rehanbabar17-art/f1-race-notifier)"
 REMINDER_TYPES = {"Sprint", "Qualifying", "Race"}
 SCHEDULE_WINDOWS = (30, 14, 7)
+RACE_POSITION_POINTS = (25, 18, 15, 12, 10, 8, 6, 4, 2, 1)
+SPRINT_POSITION_POINTS = (8, 7, 6, 5, 4, 3, 2, 1)
+TEAM_ALIASES = {
+    "red bull racing": ("red_bull", "Red Bull"),
+    "red bull": ("red_bull", "Red Bull"),
+    "racing bulls": ("rb", "RB F1 Team"),
+    "rb f1 team": ("rb", "RB F1 Team"),
+    "rb": ("rb", "RB F1 Team"),
+    "visa cash app rb": ("rb", "RB F1 Team"),
+    "visa cash app racing bulls": ("rb", "RB F1 Team"),
+    "ferrari": ("ferrari", "Ferrari"),
+    "scuderia ferrari": ("ferrari", "Ferrari"),
+    "mercedes": ("mercedes", "Mercedes"),
+    "mercedes-amg petronas f1 team": ("mercedes", "Mercedes"),
+    "mercedes-amg petronas formula one team": ("mercedes", "Mercedes"),
+    "mclaren": ("mclaren", "McLaren"),
+    "mclaren f1 team": ("mclaren", "McLaren"),
+    "alpine": ("alpine", "Alpine F1 Team"),
+    "alpine f1 team": ("alpine", "Alpine F1 Team"),
+    "haas": ("haas", "Haas F1 Team"),
+    "haas f1 team": ("haas", "Haas F1 Team"),
+    "audi": ("audi", "Audi"),
+    "audi f1 team": ("audi", "Audi"),
+    "williams": ("williams", "Williams"),
+    "williams f1 team": ("williams", "Williams"),
+    "aston martin": ("aston_martin", "Aston Martin"),
+    "aston martin aramco": ("aston_martin", "Aston Martin"),
+    "aston martin aramco f1 team": ("aston_martin", "Aston Martin"),
+    "aston martin f1 team": ("aston_martin", "Aston Martin"),
+    "cadillac": ("cadillac", "Cadillac F1 Team"),
+    "cadillac f1 team": ("cadillac", "Cadillac F1 Team"),
+}
 
 
 def api_get(path: str, **params):
@@ -196,6 +228,20 @@ def drivers_for(session_key: int) -> dict[int, str]:
         return {}
     return {
         int(row["driver_number"]): humanize_name(row.get("full_name") or row.get("name_acronym") or str(row["driver_number"]))
+        for row in rows
+        if row.get("driver_number") is not None
+    }
+
+
+def driver_metadata_for(session: dict) -> dict[int, dict]:
+    """Return OpenF1 driver/team metadata when the session has an OpenF1 key."""
+    try:
+        session_key = int(session["session_key"])
+        rows = api_get("drivers", session_key=session_key)
+    except (requests.RequestException, KeyError, TypeError, ValueError):
+        return {}
+    return {
+        int(row["driver_number"]): row
         for row in rows
         if row.get("driver_number") is not None
     }
@@ -467,10 +513,8 @@ def result_key(session: dict) -> str:
     return f"result:{YEAR}:{country}:{date}:{session['session_name'].lower()}"
 
 
-def standings_key(session: dict, category: str) -> str:
-    # Version the identity so sessions previously notified from stale tables can
-    # receive one corrected, result-verified standings update.
-    return f"{result_key(session)}:standings:verified-points-v2:{category}"
+def standings_key(session: dict, category: str, phase: str = "provisional") -> str:
+    return f"{result_key(session)}:standings:points-v3:{phase}:{category}"
 
 
 def jolpica_result_rows(endpoint: str) -> list[tuple[int, dict]]:
@@ -514,7 +558,279 @@ def jolpica_round_result_rows(round_number: int, endpoint: str) -> list[dict]:
     return output
 
 
-def fetch_standings(session: dict) -> tuple[list[dict], list[dict]]:
+def season_result_rows() -> tuple[list[tuple[int, dict]], list[tuple[int, dict]]]:
+    return jolpica_result_rows("results"), jolpica_result_rows("sprint")
+
+
+def session_round(session: dict) -> int:
+    try:
+        return int(session.get("round") or jolpica_round_for(session) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def constructor_details(name: str | None, constructor_id: str | None = None) -> tuple[str, str]:
+    display_name = str(name or constructor_id or "Unknown")
+    if constructor_id:
+        return str(constructor_id), display_name
+    normalized = " ".join(display_name.lower().split())
+    if normalized in TEAM_ALIASES:
+        return TEAM_ALIASES[normalized]
+    identifier = "".join(char.lower() if char.isalnum() else "_" for char in normalized).strip("_")
+    while "__" in identifier:
+        identifier = identifier.replace("__", "_")
+    return identifier or "unknown", display_name
+
+
+def add_standing_points(
+    driver_totals: dict,
+    constructor_totals: dict,
+    driver: dict,
+    constructor: dict,
+    points: float,
+    race_win: bool = False,
+) -> tuple[str, str] | None:
+    driver_key = str(driver.get("permanentNumber") or driver.get("driverId") or "")
+    constructor_id = str(constructor.get("constructorId") or "")
+    if not driver_key or not constructor_id:
+        return None
+    driver_entry = driver_totals.setdefault(
+        driver_key, {"Driver": driver, "points": 0.0, "wins": 0}
+    )
+    driver_entry["points"] += points
+    constructor_entry = constructor_totals.setdefault(
+        constructor_id, {"Constructor": constructor, "points": 0.0, "wins": 0}
+    )
+    constructor_entry["points"] += points
+    if race_win:
+        driver_entry["wins"] += 1
+        constructor_entry["wins"] += 1
+    return driver_key, constructor_id
+
+
+def standings_rows_from_totals(driver_totals: dict, constructor_totals: dict) -> tuple[list[dict], list[dict]]:
+    ordered_drivers = sorted(
+        driver_totals.values(),
+        key=lambda item: (-item["points"], -item["wins"], item["Driver"].get("driverId", "")),
+    )
+    ordered_constructors = sorted(
+        constructor_totals.values(),
+        key=lambda item: (-item["points"], -item["wins"], item["Constructor"].get("constructorId", "")),
+    )
+    return (
+        [
+            {"position": position, "points": item["points"], "Driver": item["Driver"]}
+            for position, item in enumerate(ordered_drivers, 1)
+        ],
+        [
+            {"position": position, "points": item["points"], "Constructor": item["Constructor"]}
+            for position, item in enumerate(ordered_constructors, 1)
+        ],
+    )
+
+
+def standings_signature(drivers: list[dict], constructors: list[dict]) -> dict[str, dict[str, float]]:
+    driver_points = {}
+    for row in drivers:
+        driver = row.get("Driver", {})
+        key = str(driver.get("permanentNumber") or driver.get("driverId") or "")
+        if key:
+            driver_points[key] = round(float(row.get("points") or 0), 3)
+    constructor_points = {}
+    for row in constructors:
+        constructor = row.get("Constructor", {})
+        key = str(constructor.get("constructorId") or "")
+        if key:
+            constructor_points[key] = round(float(row.get("points") or 0), 3)
+    return {"drivers": driver_points, "constructors": constructor_points}
+
+
+def estimate_standings(
+    session: dict,
+    event_results: list[dict],
+    event_drivers: dict[int, str],
+    state: dict,
+    season_rows: tuple[list[tuple[int, dict]], list[tuple[int, dict]]] | None = None,
+) -> tuple[list[dict], list[dict], dict]:
+    """Estimate championship totals from prior points and this event's finishing places."""
+    round_number = session_round(session)
+    session_name = session.get("session_name")
+    if not round_number or session_name not in {"Sprint", "Race"} or not event_results:
+        return [], [], {}
+    race_rows, sprint_rows = season_rows or season_result_rows()
+    driver_totals: dict[str, dict] = {}
+    constructor_totals: dict[str, dict] = {}
+    driver_by_number: dict[int, dict] = {}
+    constructor_by_number: dict[int, dict] = {}
+
+    def record_historical(round_id: int, row: dict, is_race: bool) -> bool:
+        driver = dict(row.get("Driver", {}))
+        constructor = dict(row.get("Constructor", {}))
+        number = driver.get("permanentNumber") or row.get("number")
+        if number is not None:
+            try:
+                driver_by_number[int(number)] = driver
+                constructor_by_number[int(number)] = constructor
+            except (TypeError, ValueError):
+                pass
+        if row.get("points") in {None, ""}:
+            return False
+        try:
+            points = float(row.get("points") or 0)
+        except (TypeError, ValueError):
+            return False
+        if constructor.get("constructorId") is None and constructor.get("name"):
+            constructor_id, constructor_name = constructor_details(constructor["name"])
+            constructor.update({"constructorId": constructor_id, "name": constructor_name})
+        add_standing_points(
+            driver_totals,
+            constructor_totals,
+            driver,
+            constructor,
+            points,
+            race_win=is_race and str(row.get("position")) == "1",
+        )
+        return True
+
+    for round_id, row in race_rows:
+        if round_id < round_number:
+            record_historical(round_id, row, True)
+    for round_id, row in sprint_rows:
+        if round_id < round_number:
+            record_historical(round_id, row, False)
+
+    # For a Grand Prix estimate, include this weekend's Sprint points if the
+    # point feed is complete; otherwise use the saved Sprint estimate.
+    if session_name == "Race":
+        current_sprint_rows = [row for round_id, row in sprint_rows if round_id == round_number]
+        sprint_complete = (
+            len(current_sprint_rows) >= 18
+            and all(row.get("points") not in {None, ""} for row in current_sprint_rows)
+        )
+        if sprint_complete:
+            for row in current_sprint_rows:
+                record_historical(round_number, row, False)
+        else:
+            snapshots = state.setdefault("standings_snapshots", {})
+            for saved in snapshots.values():
+                if (
+                    saved.get("round") == round_number
+                    and saved.get("session_name") == "Sprint"
+                    and str(saved.get("meeting_key")) == str(session.get("meeting_key"))
+                ):
+                    for driver_key, entry in saved.get("event_driver_points", {}).items():
+                        driver = dict(entry.get("Driver", {}))
+                        driver.setdefault("permanentNumber", driver_key)
+                        driver_totals.setdefault(
+                            str(driver_key), {"Driver": driver, "points": 0.0, "wins": 0}
+                        )["points"] += float(entry.get("points") or 0)
+                    for constructor_id, entry in saved.get("event_constructor_points", {}).items():
+                        constructor = dict(entry.get("Constructor", {}))
+                        constructor.setdefault("constructorId", constructor_id)
+                        constructor_totals.setdefault(
+                            str(constructor_id), {"Constructor": constructor, "points": 0.0, "wins": 0}
+                        )["points"] += float(entry.get("points") or 0)
+
+    metadata = driver_metadata_for(session)
+    endpoint = "sprint" if session_name == "Sprint" else "results"
+    current_rows = [row for round_id, row in (sprint_rows if endpoint == "sprint" else race_rows) if round_id == round_number]
+    jolpica_by_number = {}
+    for row in current_rows:
+        try:
+            jolpica_by_number[int(row.get("number"))] = row
+        except (TypeError, ValueError):
+            continue
+
+    point_table = SPRINT_POSITION_POINTS if session_name == "Sprint" else RACE_POSITION_POINTS
+    event_driver_points = {}
+    event_constructor_points = {}
+    for result in event_results:
+        try:
+            number = int(result.get("driver_number"))
+        except (TypeError, ValueError):
+            continue
+        try:
+            position = int(result.get("position"))
+        except (TypeError, ValueError):
+            position = 0
+        points = 0.0
+        if not result.get("dsq") and not result.get("dns") and 1 <= position <= len(point_table):
+            points = float(point_table[position - 1])
+
+        openf1_driver = metadata.get(number, {})
+        jolpica_result = jolpica_by_number.get(number, {})
+        official_driver = jolpica_result.get("Driver", {})
+        driver = dict(driver_by_number.get(number) or official_driver or {})
+        if not driver:
+            full_name = " ".join(filter(None, [openf1_driver.get("first_name"), openf1_driver.get("last_name")]))
+            full_name = full_name or event_drivers.get(number) or f"Driver {number}"
+            name_parts = humanize_name(full_name).split()
+            driver = {
+                "driverId": f"number_{number}",
+                "permanentNumber": str(number),
+                "givenName": name_parts[0] if name_parts else f"Driver {number}",
+                "familyName": " ".join(name_parts[1:]),
+            }
+        driver["permanentNumber"] = str(driver.get("permanentNumber") or number)
+
+        official_constructor = jolpica_result.get("Constructor", {})
+        team_name = openf1_driver.get("team_name")
+        if official_constructor.get("constructorId"):
+            constructor_id, constructor_name = constructor_details(
+                official_constructor.get("name"), official_constructor.get("constructorId")
+            )
+        elif team_name:
+            constructor_id, constructor_name = constructor_details(team_name)
+        else:
+            historic_constructor = constructor_by_number.get(number, {})
+            if not historic_constructor.get("constructorId") and not historic_constructor.get("name"):
+                print(f"Cannot identify constructor for driver {number}; skipping provisional standings")
+                return [], [], {}
+            constructor_id, constructor_name = constructor_details(
+                historic_constructor.get("name"), historic_constructor.get("constructorId")
+            )
+        constructor = {"constructorId": constructor_id, "name": constructor_name}
+        if not constructor_id:
+            return [], [], {}
+
+        identity = add_standing_points(
+            driver_totals,
+            constructor_totals,
+            driver,
+            constructor,
+            points,
+            race_win=session_name == "Race" and position == 1,
+        )
+        if identity:
+            driver_key, constructor_id = identity
+            driver_entry = event_driver_points.setdefault(
+                driver_key, {"Driver": driver, "points": 0.0}
+            )
+            driver_entry["points"] += points
+            constructor_entry = event_constructor_points.setdefault(
+                constructor_id, {"Constructor": constructor, "points": 0.0}
+            )
+            constructor_entry["points"] += points
+
+    if not event_driver_points or not event_constructor_points:
+        return [], [], {}
+    driver_rows, constructor_rows = standings_rows_from_totals(driver_totals, constructor_totals)
+    contribution = {
+        "drivers": event_driver_points,
+        "constructors": event_constructor_points,
+    }
+    print(
+        f"Estimated standings through round {round_number} {session_name.lower()}: "
+        f"{len(driver_rows)} drivers, {len(constructor_rows)} constructors"
+    )
+    return driver_rows, constructor_rows, contribution
+
+
+def fetch_standings(
+    session: dict,
+    season_rows: tuple[list[tuple[int, dict]], list[tuple[int, dict]]] | None = None,
+    require_sprint: bool = False,
+) -> tuple[list[dict], list[dict]]:
     """Calculate standings from point-bearing event results through this session."""
     try:
         round_number = int(session.get("round") or jolpica_round_for(session) or 0)
@@ -531,9 +847,19 @@ def fetch_standings(session: dict) -> tuple[list[dict], list[dict]]:
         or any(row.get("points") in {None, ""} for row in current_event_rows)
     ):
         return [], []
+    if session_name == "Race" and require_sprint:
+        current_sprint = jolpica_round_result_rows(round_number, "sprint")
+        if (
+            len(current_sprint) < 18
+            or any(row.get("points") in {None, ""} for row in current_sprint)
+        ):
+            return [], []
 
-    race_rows = jolpica_result_rows("results")
-    sprint_rows = jolpica_result_rows("sprint")
+    race_rows, sprint_rows = season_rows if season_rows is not None else season_result_rows()
+    if session_name == "Race" and require_sprint:
+        season_sprint = [row for round_id, row in sprint_rows if round_id == round_number]
+        if len(season_sprint) < 18 or any(row.get("points") in {None, ""} for row in season_sprint):
+            return [], []
     current_season_rows = [
         row for round_id, row in (sprint_rows if session_name == "Sprint" else race_rows)
         if round_id == round_number
@@ -584,22 +910,7 @@ def fetch_standings(session: dict) -> tuple[list[dict], list[dict]]:
             driver_entry["wins"] += 1
             constructor_entry["wins"] += 1
 
-    driver_sorted = sorted(
-        driver_totals.values(),
-        key=lambda row: (-row["points"], -row["wins"], row["Driver"].get("driverId", "")),
-    )
-    constructor_sorted = sorted(
-        constructor_totals.values(),
-        key=lambda row: (-row["points"], -row["wins"], row["Constructor"].get("constructorId", "")),
-    )
-    driver_rows = [
-        {"position": position, "points": row["points"], "Driver": row["Driver"]}
-        for position, row in enumerate(driver_sorted, 1)
-    ]
-    constructor_rows = [
-        {"position": position, "points": row["points"], "Constructor": row["Constructor"]}
-        for position, row in enumerate(constructor_sorted, 1)
-    ]
+    driver_rows, constructor_rows = standings_rows_from_totals(driver_totals, constructor_totals)
     print(
         f"Calculated standings through round {round_number} {session_name.lower()}: "
         f"{len(driver_rows)} drivers, {len(constructor_rows)} constructors"
@@ -607,7 +918,12 @@ def fetch_standings(session: dict) -> tuple[list[dict], list[dict]]:
     return driver_rows, constructor_rows
 
 
-def format_standings(session: dict, drivers: list[dict], constructors: list[dict]) -> tuple[str, str]:
+def format_standings(
+    session: dict,
+    drivers: list[dict],
+    constructors: list[dict],
+    phase: str | None = None,
+) -> tuple[str, str]:
     """Format driver and constructor standings as two separate ntfy bodies."""
     def points_text(value) -> str:
         try:
@@ -617,12 +933,18 @@ def format_standings(session: dict, drivers: list[dict], constructors: list[dict
             return str(value or "0")
 
     label = session_label(session)
-    driver_lines = [f"🏆 {label} — driver standings", ""]
+    phase_label = " (UNOFFICIAL ESTIMATE)" if phase == "provisional" else " (OFFICIAL POINTS UPDATE)" if phase == "official" else ""
+    explanation = "Estimated from finishing positions; steward decisions and final scoring can change points." if phase == "provisional" else "Updated using published event points." if phase == "official" else None
+    driver_lines = [f"🏆 {label} — driver standings{phase_label}", ""]
+    if explanation:
+        driver_lines.extend([explanation, ""])
     for row in drivers:
         driver = row.get("Driver", {})
         name = humanize_name(" ".join(filter(None, [driver.get("givenName"), driver.get("familyName")])) or "Unknown")
         driver_lines.append(f"  {row.get('position', '—')}. {name} — {points_text(row.get('points'))} pts")
-    constructor_lines = [f"🏆 {label} — constructor standings", ""]
+    constructor_lines = [f"🏆 {label} — constructor standings{phase_label}", ""]
+    if explanation:
+        constructor_lines.extend([explanation, ""])
     for row in constructors:
         constructor = row.get("Constructor", {})
         name = constructor.get("name") or "Unknown"
@@ -792,6 +1114,36 @@ def notify_result(
                 save_state(state)
 
 
+def publish_standings(
+    session: dict,
+    drivers: list[dict],
+    constructors: list[dict],
+    phase: str,
+    sent: dict,
+    now: datetime,
+    state: dict,
+    send_messages: bool = True,
+) -> None:
+    driver_message, constructor_message = format_standings(session, drivers, constructors, phase)
+    phase_title = "unofficial estimate" if phase == "provisional" else "official update"
+    for category, message in (("drivers", driver_message), ("constructors", constructor_message)):
+        key = standings_key(session, category, phase)
+        if key in sent:
+            continue
+        if send_messages:
+            notify_result(
+                message,
+                f"F1 {category[:-1] if category == 'drivers' else 'constructor'} standings — "
+                f"{session['session_name']} ({phase_title})",
+                sent,
+                key,
+                now,
+                state,
+            )
+        sent[key] = now.isoformat()
+    save_state(state)
+
+
 def main() -> None:
     now = datetime.now(timezone.utc)
     state = load_state()
@@ -834,6 +1186,7 @@ def main() -> None:
 
     # Keep the existing three-day result alert window, but retry Sprint/Race
     # standings for a week so delayed point feeds do not permanently suppress them.
+    season_rows_cache = None
     for item in all_sessions:
         ended = parse_time(item["date_end"])
         if ended > now or now - ended > timedelta(days=7):
@@ -842,14 +1195,23 @@ def main() -> None:
         key = result_key(item)
         legacy_key = f"result:{item['session_key']}"
         result_already_sent = key in sent or legacy_key in sent
-        if not result_already_sent and result_window_open:
-            results, drivers = fetch_results(item)
-            if not results:
-                print(f"Result not available yet for {session_label(item)}")
-                continue
+        is_scoring_session = item["session_name"] in {"Sprint", "Race"}
+        provisional_driver_key = standings_key(item, "drivers", "provisional")
+        provisional_constructor_key = standings_key(item, "constructors", "provisional")
+        official_driver_key = standings_key(item, "drivers", "official")
+        official_constructor_key = standings_key(item, "constructors", "official")
+        if (not result_already_sent and result_window_open) or (
+            is_scoring_session
+            and (provisional_driver_key not in sent or provisional_constructor_key not in sent)
+        ):
+            results, event_drivers = fetch_results(item)
             results = normalize_results(results)
+        else:
+            results, event_drivers = [], {}
+
+        if not result_already_sent and result_window_open and results:
             notify_result(
-                format_result(item, results, drivers),
+                format_result(item, results, event_drivers),
                 f"F1 result — {item['session_name']}",
                 sent,
                 key,
@@ -858,29 +1220,95 @@ def main() -> None:
             )
             sent[key] = now.isoformat()
             save_state(state)
-        if item["session_name"] not in {"Sprint", "Race"}:
+        elif not result_already_sent and result_window_open:
+            print(f"Result not available yet for {session_label(item)}")
+        if not is_scoring_session:
             continue
-        driver_key = standings_key(item, "drivers")
-        constructor_key = standings_key(item, "constructors")
-        if driver_key in sent and constructor_key in sent:
+
+        snapshots = state.setdefault("standings_snapshots", {})
+        if not isinstance(snapshots, dict):
+            snapshots = state["standings_snapshots"] = {}
+        snapshot_key = result_key(item)
+        snapshot = snapshots.setdefault(snapshot_key, {})
+        round_number = session_round(item)
+        if round_number:
+            item["round"] = str(round_number)
+        snapshot.update({
+            "meeting_key": str(item.get("meeting_key", "")),
+            "round": round_number,
+            "session_name": item["session_name"],
+            "updated_at": now.isoformat(),
+        })
+
+        # This event was already corrected with verified point rows under the
+        # prior state-key scheme. Migrate its dedupe markers without replaying it.
+        legacy_v2_keys = [
+            f"{key}:standings:verified-points-v2:{category}"
+            for category in ("drivers", "constructors")
+        ]
+        if all(old_key in sent for old_key in legacy_v2_keys):
+            sent.setdefault(official_driver_key, now.isoformat())
+            sent.setdefault(official_constructor_key, now.isoformat())
+            save_state(state)
             continue
+
+        if results and (provisional_driver_key not in sent or provisional_constructor_key not in sent):
+            try:
+                if season_rows_cache is None:
+                    season_rows_cache = season_result_rows()
+                estimated_drivers, estimated_constructors, contribution = estimate_standings(
+                    item, results, event_drivers, state, season_rows_cache
+                )
+            except (requests.RequestException, KeyError, TypeError, ValueError) as error:
+                print(f"Could not estimate standings for {session_label(item)}: {error}")
+            else:
+                if estimated_drivers and estimated_constructors:
+                    snapshot["estimated"] = standings_signature(estimated_drivers, estimated_constructors)
+                    snapshot["event_driver_points"] = contribution["drivers"]
+                    snapshot["event_constructor_points"] = contribution["constructors"]
+                    publish_standings(
+                        item, estimated_drivers, estimated_constructors,
+                        "provisional", sent, now, state,
+                    )
+
+        if official_driver_key in sent and official_constructor_key in sent:
+            continue
+        require_sprint = item["session_name"] == "Race" and any(
+            other["session_name"] == "Sprint"
+            and other.get("meeting_key") == item.get("meeting_key")
+            and parse_time(other["date_end"]) <= now
+            for other in all_sessions
+        )
         try:
-            drivers, constructors = fetch_standings(item)
+            if season_rows_cache is None:
+                season_rows_cache = season_result_rows()
+            official_drivers, official_constructors = fetch_standings(
+                item, season_rows_cache, require_sprint=require_sprint
+            )
         except (requests.RequestException, KeyError, TypeError, ValueError) as error:
-            print(f"Standings not available yet for {session_label(item)}: {error}")
+            print(f"Official standings not available yet for {session_label(item)}: {error}")
             continue
-        if not drivers or not constructors:
-            print(f"Standings not available yet for {session_label(item)}")
+        if not official_drivers or not official_constructors:
+            print(f"Official standings not available yet for {session_label(item)}")
             continue
-        driver_message, constructor_message = format_standings(item, drivers, constructors)
-        if driver_key not in sent:
-            notify_result(driver_message, f"F1 driver standings — {item['session_name']}", sent, driver_key, now, state)
-            sent[driver_key] = now.isoformat()
-            save_state(state)
-        if constructor_key not in sent:
-            notify_result(constructor_message, f"F1 constructor standings — {item['session_name']}", sent, constructor_key, now, state)
-            sent[constructor_key] = now.isoformat()
-            save_state(state)
+
+        official_signature = standings_signature(official_drivers, official_constructors)
+        estimated_signature = snapshot.get("estimated")
+        previous_official_signature = snapshot.get("official")
+        points_differ = estimated_signature is None or estimated_signature != official_signature
+        if previous_official_signature is not None and previous_official_signature != official_signature:
+            points_differ = True
+        snapshot["official"] = official_signature
+        if points_differ:
+            publish_standings(
+                item, official_drivers, official_constructors,
+                "official", sent, now, state,
+            )
+        else:
+            publish_standings(
+                item, official_drivers, official_constructors,
+                "official", sent, now, state, send_messages=False,
+            )
 
     # Keep the state compact while retaining a month of deduplication history.
     cutoff = now - timedelta(days=35)
@@ -888,6 +1316,12 @@ def main() -> None:
         key: value for key, value in sent.items()
         if value and parse_time(value) >= cutoff
     }
+    snapshots = state.get("standings_snapshots", {})
+    if isinstance(snapshots, dict):
+        state["standings_snapshots"] = {
+            key: value for key, value in snapshots.items()
+            if not value.get("updated_at") or parse_time(value["updated_at"]) >= cutoff
+        }
     save_state(state)
     print(f"OK: checked {len(all_sessions)} sessions; sent-state entries={len(state['sent'])}")
 

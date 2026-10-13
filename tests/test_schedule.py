@@ -38,6 +38,13 @@ def points_row(driver_id, driver_name, constructor_id, constructor_name, points,
     }
 
 
+def season_points_row(number, driver_id, driver_name, constructor_id, constructor_name, points, position):
+    row = points_row(driver_id, driver_name, constructor_id, constructor_name, points, position)
+    row["number"] = str(number)
+    row["Driver"]["permanentNumber"] = str(number)
+    return row
+
+
 class ScheduleTests(unittest.TestCase):
     def run_notifier(self, state, races, notify):
         with (
@@ -236,20 +243,122 @@ class ScheduleTests(unittest.TestCase):
             patch.object(notifier, "jolpica_result_rows") as season_rows,
         ):
             self.assertEqual(notifier.fetch_standings(session), ([], []))
-        season_rows.assert_not_called()
+            season_rows.assert_not_called()
 
-    def test_standings_key_uses_verified_points_version(self):
+    def test_race_official_standings_wait_for_same_round_sprint_points(self):
+        race_rows, sprint_rows = self.standings_fixtures()
+        session = {"country_name": "Singapore", "session_name": "Race", "round": "3"}
+        race_event_rows = [row for round_id, row in race_rows if round_id == 3]
+        with patch.object(
+            notifier,
+            "jolpica_round_result_rows",
+            side_effect=[race_event_rows, []],
+        ) as event_rows:
+            result = notifier.fetch_standings(
+                session, (race_rows, sprint_rows), require_sprint=True
+            )
+        self.assertEqual(result, ([], []))
+        self.assertEqual(event_rows.call_count, 2)
+
+    def test_provisional_sprint_standings_use_sprint_places_and_driver_teams(self):
+        session = {
+            "meeting_key": 7,
+            "session_key": 77,
+            "country_name": "Bahrain",
+            "session_name": "Sprint",
+            "round": "2",
+        }
+        race_rows = [
+            (1, season_points_row(3, "max", "Max Verstappen", "red_bull", "Red Bull", 25, 1)),
+            (1, season_points_row(44, "hamilton", "Lewis Hamilton", "ferrari", "Ferrari", 18, 2)),
+        ]
+        event_results = [
+            {"driver_number": 3, "position": 1},
+            {"driver_number": 44, "position": 8},
+            {"driver_number": 12, "position": 9},
+        ]
+        metadata = {
+            3: {"driver_number": 3, "first_name": "Max", "last_name": "Verstappen", "team_name": "Red Bull Racing"},
+            44: {"driver_number": 44, "first_name": "Lewis", "last_name": "Hamilton", "team_name": "Ferrari"},
+            12: {"driver_number": 12, "first_name": "Kimi", "last_name": "Antonelli", "team_name": "Mercedes"},
+        }
+        with patch.object(notifier, "driver_metadata_for", return_value=metadata):
+            drivers, constructors, contribution = notifier.estimate_standings(
+                session, event_results, {3: "Max Verstappen", 44: "Lewis Hamilton"},
+                {"sent": {}}, (race_rows, []),
+            )
+        driver_points = {row["Driver"]["permanentNumber"]: row["points"] for row in drivers}
+        constructor_points = {row["Constructor"]["constructorId"]: row["points"] for row in constructors}
+        self.assertEqual(driver_points["3"], 33.0)
+        self.assertEqual(driver_points["44"], 19.0)
+        self.assertEqual(driver_points["12"], 0.0)
+        self.assertEqual(constructor_points["red_bull"], 33.0)
+        self.assertEqual(constructor_points["ferrari"], 19.0)
+        self.assertEqual(constructor_points["mercedes"], 0.0)
+        self.assertEqual(contribution["drivers"]["3"]["points"], 8.0)
+
+    def test_provisional_race_estimate_includes_saved_same_weekend_sprint(self):
+        session = {
+            "meeting_key": 7,
+            "session_key": 78,
+            "country_name": "Bahrain",
+            "session_name": "Race",
+            "round": "2",
+        }
+        race_rows = [
+            (1, season_points_row(3, "max", "Max Verstappen", "red_bull", "Red Bull", 25, 1)),
+            (1, season_points_row(44, "hamilton", "Lewis Hamilton", "ferrari", "Ferrari", 18, 2)),
+        ]
+        saved_sprint = {
+            "meeting_key": "7",
+            "round": 2,
+            "session_name": "Sprint",
+            "event_driver_points": {
+                "3": {"Driver": {"driverId": "max", "permanentNumber": "3", "givenName": "Max", "familyName": "Verstappen"}, "points": 8},
+            },
+            "event_constructor_points": {
+                "red_bull": {"Constructor": {"constructorId": "red_bull", "name": "Red Bull"}, "points": 8},
+            },
+        }
+        metadata = {
+            3: {"driver_number": 3, "first_name": "Max", "last_name": "Verstappen", "team_name": "Red Bull Racing"},
+            44: {"driver_number": 44, "first_name": "Lewis", "last_name": "Hamilton", "team_name": "Ferrari"},
+        }
+        with patch.object(notifier, "driver_metadata_for", return_value=metadata):
+            drivers, constructors, _ = notifier.estimate_standings(
+                session,
+                [{"driver_number": 3, "position": 1}, {"driver_number": 44, "position": 2}],
+                {3: "Max Verstappen", 44: "Lewis Hamilton"},
+                {"sent": {}, "standings_snapshots": {"sprint-key": saved_sprint}},
+                (race_rows, []),
+            )
+        driver_points = {row["Driver"]["permanentNumber"]: row["points"] for row in drivers}
+        constructor_points = {row["Constructor"]["constructorId"]: row["points"] for row in constructors}
+        self.assertEqual(driver_points["3"], 58.0)
+        self.assertEqual(driver_points["44"], 36.0)
+        self.assertEqual(constructor_points["red_bull"], 58.0)
+        self.assertEqual(constructor_points["ferrari"], 36.0)
+
+    def test_standings_key_separates_provisional_and_official_phases(self):
         key = notifier.standings_key({
             "country_name": "Singapore",
             "session_name": "Race",
             "date_start": "2026-10-11T12:00:00+00:00",
         }, "drivers")
-        self.assertIn("verified-points-v2:drivers", key)
+        self.assertIn("points-v3:provisional:drivers", key)
+        official_key = notifier.standings_key({
+            "country_name": "Singapore",
+            "session_name": "Race",
+            "date_start": "2026-10-11T12:00:00+00:00",
+        }, "drivers", "official")
+        self.assertIn("points-v3:official:drivers", official_key)
+        self.assertNotEqual(key, official_key)
 
-    def test_standings_retry_for_seven_days_without_republishing_old_results(self):
+    def test_delayed_provisional_standings_retry_without_republishing_result_alert(self):
         session = {
             "meeting_key": 1296,
             "session_key": 11383,
+            "round": "17",
             "country_name": "Singapore",
             "session_name": "Sprint",
             "date_start": (NOW - timedelta(days=4, hours=1)).isoformat(),
@@ -257,30 +366,145 @@ class ScheduleTests(unittest.TestCase):
         }
         state = {"sent": {}}
         messages = []
-        standings = ([
-            {"position": 1, "points": 8, "Driver": {"givenName": "Max", "familyName": "Verstappen"}},
-        ], [
-            {"position": 1, "points": 8, "Constructor": {"name": "Red Bull"}},
-        ])
+        provisional = (
+            [{"position": 1, "points": 8, "Driver": {"permanentNumber": "1", "givenName": "Max", "familyName": "Verstappen"}}],
+            [{"position": 1, "points": 8, "Constructor": {"constructorId": "red_bull", "name": "Red Bull"}}],
+        )
         with (
-            patch.object(notifier, "fetch_standings", return_value=standings) as fetch_standings,
-            patch.object(notifier, "fetch_results") as fetch_results,
+            patch.object(notifier, "fetch_standings", return_value=([], [])) as fetch_standings,
+            patch.object(notifier, "fetch_results", return_value=([{"driver_number": 1, "position": 1}], {1: "Max Verstappen"})) as fetch_results,
+            patch.object(notifier, "estimate_standings", return_value=(*provisional, {"drivers": {}, "constructors": {}})) as estimate,
+            patch.object(notifier, "season_result_rows", return_value=([], [])),
         ):
             self.run_notifier(state, [session], lambda *args, **kwargs: messages.append(args))
-        fetch_standings.assert_called_once_with(session)
-        fetch_results.assert_not_called()
-        self.assertIn("F1 driver standings — Sprint", [args[1] for args in messages])
-        self.assertIn("F1 constructor standings — Sprint", [args[1] for args in messages])
+        fetch_standings.assert_called_once()
+        fetch_results.assert_called_once_with(session)
+        estimate.assert_called_once()
+        titles = [args[1] for args in messages]
+        self.assertNotIn("F1 result — Sprint", titles)
+        self.assertTrue(any("F1 driver standings — Sprint (unofficial estimate)" in title for title in titles))
+        self.assertTrue(any("F1 constructor standings — Sprint (unofficial estimate)" in title for title in titles))
 
         messages.clear()
         with (
-            patch.object(notifier, "fetch_standings") as fetch_standings,
+            patch.object(notifier, "fetch_standings", return_value=([], [])) as fetch_standings,
             patch.object(notifier, "fetch_results") as fetch_results,
+            patch.object(notifier, "season_result_rows", return_value=([], [])),
         ):
             self.run_notifier(state, [session], lambda *args, **kwargs: messages.append(args))
-        fetch_standings.assert_not_called()
+        fetch_standings.assert_called_once()
         fetch_results.assert_not_called()
         self.assertEqual(messages, [])
+
+    def test_partial_provisional_standings_retries_only_the_missing_category(self):
+        session = {
+            "meeting_key": 1296,
+            "session_key": 11383,
+            "round": "17",
+            "country_name": "Singapore",
+            "session_name": "Sprint",
+            "date_start": (NOW - timedelta(days=4, hours=1)).isoformat(),
+            "date_end": (NOW - timedelta(days=4)).isoformat(),
+        }
+        driver_key = notifier.standings_key(session, "drivers", "provisional")
+        state = {"sent": {driver_key: NOW.isoformat()}}
+        estimates = (
+            [{"position": 1, "points": 8, "Driver": {"permanentNumber": "1", "givenName": "Max", "familyName": "Verstappen"}}],
+            [{"position": 1, "points": 8, "Constructor": {"constructorId": "red_bull", "name": "Red Bull"}}],
+        )
+        messages = []
+        with (
+            patch.object(notifier, "fetch_results", return_value=([{"driver_number": 1, "position": 1}], {1: "Max Verstappen"})),
+            patch.object(notifier, "estimate_standings", return_value=(*estimates, {"drivers": {}, "constructors": {}})),
+            patch.object(notifier, "season_result_rows", return_value=([], [])),
+            patch.object(notifier, "fetch_standings", return_value=([], [])),
+        ):
+            self.run_notifier(state, [session], lambda *args, **kwargs: messages.append(args))
+        titles = [args[1] for args in messages]
+        self.assertFalse(any("F1 driver standings — Sprint (unofficial estimate)" in title for title in titles))
+        self.assertTrue(any("F1 constructor standings — Sprint (unofficial estimate)" in title for title in titles))
+
+    def test_official_points_difference_sends_one_corrected_standings_update(self):
+        session = {
+            "meeting_key": 2,
+            "session_key": 22,
+            "round": "1",
+            "country_name": "Bahrain",
+            "session_name": "Race",
+            "date_start": (NOW - timedelta(hours=2)).isoformat(),
+            "date_end": (NOW - timedelta(hours=1)).isoformat(),
+        }
+        provisional = (
+            [{"position": 1, "points": 25, "Driver": {"permanentNumber": "1", "givenName": "Max", "familyName": "Verstappen"}}],
+            [{"position": 1, "points": 25, "Constructor": {"constructorId": "red_bull", "name": "Red Bull"}}],
+        )
+        official = (
+            [{"position": 1, "points": 18, "Driver": {"permanentNumber": "1", "givenName": "Max", "familyName": "Verstappen"}}],
+            [{"position": 1, "points": 18, "Constructor": {"constructorId": "red_bull", "name": "Red Bull"}}],
+        )
+        state = {"sent": {}}
+        messages = []
+        with (
+            patch.object(notifier, "fetch_results", return_value=([{"driver_number": 1, "position": 1}], {1: "Max Verstappen"})),
+            patch.object(notifier, "estimate_standings", return_value=(*provisional, {"drivers": {}, "constructors": {}})),
+            patch.object(notifier, "season_result_rows", return_value=([], [])),
+            patch.object(notifier, "fetch_standings", side_effect=[([], []), official]),
+        ):
+            self.run_notifier(state, [session], lambda *args, **kwargs: messages.append(args))
+        self.assertTrue(any("unofficial estimate" in args[1] for args in messages))
+        self.assertFalse(any("official update" in args[1] for args in messages))
+
+        messages.clear()
+        with (
+            patch.object(notifier, "fetch_results") as fetch_results,
+            patch.object(notifier, "season_result_rows", return_value=([], [])),
+            patch.object(notifier, "fetch_standings", return_value=official),
+        ):
+            self.run_notifier(state, [session], lambda *args, **kwargs: messages.append(args))
+        fetch_results.assert_not_called()
+        self.assertEqual(sum("official update" in args[1] for args in messages), 2)
+        self.assertTrue(all("18 pts" in args[0] for args in messages if "official update" in args[1]))
+
+        messages.clear()
+        with patch.object(notifier, "fetch_standings") as fetch_standings:
+            self.run_notifier(state, [session], lambda *args, **kwargs: messages.append(args))
+        fetch_standings.assert_not_called()
+        self.assertEqual(messages, [])
+
+    def test_matching_official_points_do_not_send_a_duplicate_update(self):
+        session = {
+            "meeting_key": 2,
+            "session_key": 22,
+            "round": "1",
+            "country_name": "Bahrain",
+            "session_name": "Race",
+            "date_start": (NOW - timedelta(hours=2)).isoformat(),
+            "date_end": (NOW - timedelta(hours=1)).isoformat(),
+        }
+        standings = (
+            [{"position": 1, "points": 25, "Driver": {"permanentNumber": "1", "givenName": "Max", "familyName": "Verstappen"}}],
+            [{"position": 1, "points": 25, "Constructor": {"constructorId": "red_bull", "name": "Red Bull"}}],
+        )
+        state = {"sent": {}}
+        messages = []
+        with (
+            patch.object(notifier, "fetch_results", return_value=([{"driver_number": 1, "position": 1}], {1: "Max Verstappen"})),
+            patch.object(notifier, "estimate_standings", return_value=(*standings, {"drivers": {}, "constructors": {}})),
+            patch.object(notifier, "season_result_rows", return_value=([], [])),
+            patch.object(notifier, "fetch_standings", side_effect=[([], []), standings]),
+        ):
+            self.run_notifier(state, [session], lambda *args, **kwargs: messages.append(args))
+        messages.clear()
+        with (
+            patch.object(notifier, "fetch_results") as fetch_results,
+            patch.object(notifier, "season_result_rows", return_value=([], [])),
+            patch.object(notifier, "fetch_standings", return_value=standings),
+        ):
+            self.run_notifier(state, [session], lambda *args, **kwargs: messages.append(args))
+        fetch_results.assert_not_called()
+        self.assertEqual(messages, [])
+        self.assertIn(notifier.standings_key(session, "drivers", "official"), state["sent"])
+        self.assertIn(notifier.standings_key(session, "constructors", "official"), state["sent"])
 
     def test_new_race_updates_each_applicable_window_once(self):
         state = {"sent": {}}
