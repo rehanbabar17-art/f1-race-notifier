@@ -264,6 +264,13 @@ def jolpica_round_for(session: dict) -> str | None:
     return None
 
 
+def jolpica_time_value(value) -> str | None:
+    """Read Jolpica time fields returned either as strings or nested objects."""
+    if isinstance(value, dict):
+        value = value.get("time")
+    return value if isinstance(value, str) else None
+
+
 def fallback_results(session: dict) -> tuple[list[dict], dict[int, str]]:
     """Fetch race/qualifying/sprint results from Jolpica."""
     endpoint = {"Race": "results", "Qualifying": "qualifying", "Sprint": "sprint"}.get(session["session_name"])
@@ -288,11 +295,15 @@ def fallback_results(session: dict) -> tuple[list[dict], dict[int, str]]:
         except (TypeError, ValueError):
             position = None
         status = row.get("status")
-        race_time = row.get("Time", {}).get("time")
-        fastest_lap = row.get("FastestLap", {}).get("Time", {}).get("time")
+        race_time = jolpica_time_value(row.get("Time"))
+        fastest_lap = jolpica_time_value(
+            row.get("FastestLap", {}).get("Time")
+            if isinstance(row.get("FastestLap"), dict)
+            else None
+        )
         if session["session_name"] == "Qualifying":
             qualifying_time = next(
-                (row.get(key, {}).get("time") for key in ("Q3", "Q2", "Q1") if row.get(key)),
+                (jolpica_time_value(row.get(key)) for key in ("Q3", "Q2", "Q1") if row.get(key)),
                 None,
             )
         else:

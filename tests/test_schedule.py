@@ -170,6 +170,31 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(result, fallback)
         jolpica_call.assert_called_once_with(session)
 
+    def test_jolpica_qualifying_accepts_string_time_fields(self):
+        session = {"session_name": "Qualifying", "round": "20"}
+        payload = {
+            "MRData": {
+                "RaceTable": {
+                    "Races": [
+                        {
+                            "QualifyingResults": [
+                                {
+                                    "number": "1",
+                                    "position": "1",
+                                    "Driver": {"givenName": "Max", "familyName": "Verstappen"},
+                                    "Q3": "1:15.000",
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+        with patch.object(notifier, "jolpica_get", return_value=payload):
+            results, drivers = notifier.fallback_results(session)
+        self.assertEqual(results[0]["lap_time"], "1:15.000")
+        self.assertEqual(drivers[1], "Max Verstappen")
+
     def test_session_result_retries_transient_not_found(self):
         response = requests.Response()
         response.status_code = 404
