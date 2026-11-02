@@ -25,7 +25,16 @@ def client():
         region_name="us-east-005",
         aws_access_key_id=os.environ["B2_KEY_ID"],
         aws_secret_access_key=os.environ["B2_APPLICATION_KEY"],
-        config=Config(signature_version="s3v4"),
+        # B2 can include checksum headers on error responses. Newer botocore
+        # versions then wrap the body and can fail while handling the error
+        # (StreamingChecksumBody has no attribute "strip"). Checksum handling
+        # is not required for this small state object, so use it only when the
+        # S3 operation explicitly requires it.
+        config=Config(
+            signature_version="s3v4",
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        ),
     )
 
 
