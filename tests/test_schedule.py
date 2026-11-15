@@ -564,6 +564,137 @@ class ScheduleTests(unittest.TestCase):
         self.run_notifier(state, [first_race, second_race], lambda *args, **kwargs: messages.append(args))
         self.assertEqual(messages, [])
 
+    def test_schedule_windows_and_today_include_qualifying_sprint_qualifying_sprint_and_race(self):
+        def make_session(meeting_key, country, session_name, offset_days, offset_hours=0):
+            start = NOW + timedelta(days=offset_days, hours=offset_hours)
+            end = start + timedelta(hours=2)
+            return {
+                "meeting_key": meeting_key,
+                "session_key": f"{meeting_key}:{session_name}",
+                "session_name": session_name,
+                "country_name": country,
+                "date_start": start.isoformat(),
+                "date_end": end.isoformat(),
+            }
+
+        sessions = [
+            make_session(1, "Brazil", "Practice 1", 0, 1),
+            make_session(1, "Brazil", "Sprint Qualifying", 0, 3),
+            make_session(1, "Brazil", "Sprint", 5, 1),
+            make_session(1, "Brazil", "Qualifying", 5, 4),
+            make_session(1, "Brazil", "Race", 6, 2),
+            make_session(2, "Las Vegas", "Qualifying", 12, 1),
+            make_session(2, "Las Vegas", "Race", 13, 1),
+            make_session(3, "Qatar", "Sprint Qualifying", 20, 1),
+            make_session(3, "Qatar", "Sprint", 21, 1),
+            make_session(3, "Qatar", "Qualifying", 21, 4),
+            make_session(3, "Qatar", "Race", 22, 1),
+        ]
+        state = {"sent": {}}
+        messages = []
+        self.run_notifier(state, sessions, lambda *args, **kwargs: messages.append(args))
+
+        by_title = {args[1]: args[0] for args in messages}
+        self.assertIn("F1 sessions today", by_title)
+        self.assertIn("Brazil — Sprint Qualifying", by_title["F1 sessions today"])
+        self.assertNotIn("Practice 1", by_title["F1 sessions today"])
+
+        self.assertIn("F1 schedule — next 7 days", by_title)
+        for expected in (
+            "Brazil — Sprint Qualifying",
+            "Brazil — Sprint",
+            "Brazil — Qualifying",
+            "Brazil — Race",
+        ):
+            self.assertIn(expected, by_title["F1 schedule — next 7 days"])
+        self.assertNotIn("Practice 1", by_title["F1 schedule — next 7 days"])
+        self.assertNotIn("Las Vegas", by_title["F1 schedule — next 7 days"])
+
+        self.assertIn("F1 schedule — next 14 days", by_title)
+        for expected in (
+            "Brazil — Sprint Qualifying",
+            "Brazil — Sprint",
+            "Brazil — Qualifying",
+            "Brazil — Race",
+            "Las Vegas — Qualifying",
+            "Las Vegas — Race",
+        ):
+            self.assertIn(expected, by_title["F1 schedule — next 14 days"])
+        self.assertNotIn("Qatar", by_title["F1 schedule — next 14 days"])
+
+        self.assertIn("F1 schedule — next 30 days", by_title)
+        for expected in (
+            "Qatar — Sprint Qualifying",
+            "Qatar — Sprint",
+            "Qatar — Qualifying",
+            "Qatar — Race",
+        ):
+            self.assertIn(expected, by_title["F1 schedule — next 30 days"])
+
+    def test_sessions_merges_missing_qualifying_from_jolpica_into_openf1_meeting(self):
+        openf1_rows = [
+            {
+                "meeting_key": 1295,
+                "session_key": 9901,
+                "session_name": "Race",
+                "country_name": "United States",
+                "date_start": "2026-10-18T19:00:00+00:00",
+                "date_end": "2026-10-18T21:00:00+00:00",
+            },
+            {
+                "meeting_key": 1300,
+                "session_key": 9999,
+                "session_name": "Race",
+                "country_name": "United States",
+                "date_start": "2026-11-22T04:00:00+00:00",
+                "date_end": "2026-11-22T06:00:00+00:00",
+            },
+        ]
+        jolpica_rows = [
+            {
+                "meeting_key": "jolpica:2026:18",
+                "session_key": "jolpica:2026:18:race",
+                "session_name": "Race",
+                "country_name": "United States",
+                "date_start": "2026-10-18T19:00:00+00:00",
+                "date_end": "2026-10-18T21:00:00+00:00",
+                "source": "jolpica",
+                "round": "18",
+            },
+            {
+                "meeting_key": "jolpica:2026:21",
+                "session_key": "jolpica:2026:21:qualifying",
+                "session_name": "Qualifying",
+                "country_name": "Las Vegas",
+                "date_start": "2026-11-21T04:00:00+00:00",
+                "date_end": "2026-11-21T06:00:00+00:00",
+                "source": "jolpica",
+                "round": "21",
+            },
+            {
+                "meeting_key": "jolpica:2026:21",
+                "session_key": "jolpica:2026:21:race",
+                "session_name": "Race",
+                "country_name": "Las Vegas",
+                "date_start": "2026-11-22T04:00:00+00:00",
+                "date_end": "2026-11-22T06:00:00+00:00",
+                "source": "jolpica",
+                "round": "21",
+            },
+        ]
+        with (
+            patch.object(notifier, "YEAR", 2026),
+            patch.object(notifier, "api_get", return_value=openf1_rows),
+            patch.object(notifier, "fallback_sessions", return_value=jolpica_rows),
+        ):
+            merged = notifier.sessions()
+
+        self.assertEqual(len(merged), 3)
+        vegas_quali = next(s for s in merged if s["session_name"] == "Qualifying")
+        self.assertEqual(vegas_quali["meeting_key"], 1300)
+        self.assertEqual(vegas_quali["country_name"], "United States")
+        self.assertEqual(vegas_quali["date_start"], "2026-11-21T04:00:00+00:00")
+
 
 if __name__ == "__main__":
     unittest.main()

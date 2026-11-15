@@ -19,7 +19,7 @@ YEAR = int(os.environ.get("F1_YEAR", datetime.now(timezone.utc).year))
 USER_TZ = ZoneInfo(os.environ.get("USER_TIMEZONE", "Asia/Karachi"))
 STATE_FILE = Path(os.environ.get("F1_STATE_FILE", "/tmp/f1-state.json"))
 USER_AGENT = "F1RaceNotifier/1.0 (+https://github.com/rehanbabar17-art/f1-race-notifier)"
-REMINDER_TYPES = {"Sprint", "Qualifying", "Race"}
+REMINDER_TYPES = {"Sprint Qualifying", "Sprint Shootout", "Sprint", "Qualifying", "Race"}
 SCHEDULE_WINDOWS = (30, 14, 7)
 RACE_POSITION_POINTS = (25, 18, 15, 12, 10, 8, 6, 4, 2, 1)
 SPRINT_POSITION_POINTS = (8, 7, 6, 5, 4, 3, 2, 1)
@@ -166,19 +166,78 @@ def notify(message: str, title: str, priority: str = "default") -> None:
             time.sleep(2 ** attempt)
 
 
+def _normalized_session_name(name: str) -> str:
+    cleaned = " ".join(str(name or "").split())
+    if cleaned.lower() in {"sprint shootout", "sprint-shootout"}:
+        return "Sprint Qualifying"
+    return cleaned
+
+
 def sessions() -> list[dict]:
+    """Combine OpenF1 sessions with Jolpica's calendar so no competitive session is omitted."""
+    openf1_sessions: list[dict] = []
     try:
         data = api_get("sessions", year=YEAR)
+        for item in data:
+            if item.get("is_cancelled"):
+                continue
+            normalized = dict(item)
+            normalized["session_name"] = _normalized_session_name(item.get("session_name", ""))
+            openf1_sessions.append(normalized)
     except requests.RequestException as error:
-        # A transient upstream outage should not turn into repeated cron failures.
-        # The next cron poll will retry and state remains unchanged.
         print(f"OpenF1 sessions unavailable; using Jolpica fallback: {error}")
-        try:
-            return fallback_sessions()
-        except requests.RequestException as fallback_error:
-            print(f"Jolpica schedule unavailable; skipping this poll: {fallback_error}")
-            return []
-    return [item for item in data if not item.get("is_cancelled")]
+
+    try:
+        calendar_sessions = fallback_sessions()
+    except requests.RequestException as fallback_error:
+        print(f"Jolpica schedule unavailable: {fallback_error}")
+        calendar_sessions = []
+
+    if not openf1_sessions:
+        return calendar_sessions
+    if not calendar_sessions:
+        return openf1_sessions
+
+    openf1_by_date_name: dict[tuple[str, str], dict] = {}
+    for op in openf1_sessions:
+        date_prefix = str(op.get("date_start", ""))[:10]
+        sname = op["session_name"].lower()
+        if date_prefix and sname:
+            openf1_by_date_name[(date_prefix, sname)] = op
+
+    # Map each Jolpica round (meeting_key) to its matching OpenF1 meeting_key and country_name
+    # using exact (date, session_name) matches so multi-race countries (e.g. USA/Italy) never collide.
+    round_to_openf1: dict[str, tuple[object, str]] = {}
+    for cal in calendar_sessions:
+        date_prefix = str(cal.get("date_start", ""))[:10]
+        sname = cal["session_name"].lower()
+        match = openf1_by_date_name.get((date_prefix, sname))
+        if match:
+            round_to_openf1[cal["meeting_key"]] = (match["meeting_key"], match["country_name"])
+            if cal.get("round") and not match.get("round"):
+                match["round"] = cal["round"]
+
+    existing_meeting_sessions = {
+        (str(op.get("meeting_key")), op["session_name"].lower())
+        for op in openf1_sessions
+    }
+    merged = list(openf1_sessions)
+    for cal in calendar_sessions:
+        date_prefix = str(cal.get("date_start", ""))[:10]
+        sname = cal["session_name"].lower()
+        if (date_prefix, sname) in openf1_by_date_name:
+            continue
+        item = dict(cal)
+        if cal["meeting_key"] in round_to_openf1:
+            op_meeting_key, op_country = round_to_openf1[cal["meeting_key"]]
+            if (str(op_meeting_key), sname) in existing_meeting_sessions:
+                continue
+            item["meeting_key"] = op_meeting_key
+            item["country_name"] = op_country
+            existing_meeting_sessions.add((str(op_meeting_key), sname))
+        merged.append(item)
+
+    return merged
 
 
 def fallback_sessions() -> list[dict]:
@@ -191,6 +250,7 @@ def fallback_sessions() -> list[dict]:
         ("SecondPractice", "Practice 2"),
         ("ThirdPractice", "Practice 3"),
         ("SprintQualifying", "Sprint Qualifying"),
+        ("SprintShootout", "Sprint Qualifying"),
         ("Sprint", "Sprint"),
         ("Qualifying", "Qualifying"),
         ("date", "Race"),
@@ -526,6 +586,15 @@ def result_key(session: dict) -> str:
 
 def standings_key(session: dict, category: str, phase: str = "provisional") -> str:
     return f"{result_key(session)}:standings:points-v3:{phase}:{category}"
+
+
+def schedule_key(session: dict, days: int) -> str:
+    """Deduplication key for 30-, 14-, and 7-day schedule window notifications."""
+    base = f"schedule:{YEAR}:{days}:{session['meeting_key']}"
+    if session.get("session_name") == "Race":
+        return base
+    slug = str(session.get("session_name", "")).lower().replace(" ", "-")
+    return f"{base}:{slug}"
 
 
 def jolpica_result_rows(endpoint: str) -> list[tuple[int, dict]]:
@@ -1004,7 +1073,7 @@ def normalize_results(results: list[dict]) -> list[dict]:
 
 def format_schedule(upcoming: list[dict], days: int) -> str:
     grouped: dict[str, list[dict]] = {}
-    for item in upcoming:
+    for item in sorted(upcoming, key=lambda x: x["date_start"]):
         local = parse_time(item["date_start"]).astimezone(USER_TZ)
         grouped.setdefault(local.strftime("%A, %d %b"), []).append(item)
     lines = [f"🏎️ F1 races in the next {days} days", ""]
@@ -1160,35 +1229,35 @@ def main() -> None:
     state = load_state()
     sent = state["sent"]
     all_sessions = sessions()
-    upcoming_races = [item for item in all_sessions if item["session_name"] == "Race"]
+    upcoming_sessions = [item for item in all_sessions if item["session_name"] in REMINDER_TYPES]
 
-    # Send a full window schedule the first time a new meeting appears in it.
-    # Rechecking on each run lets newly added races trigger an updated schedule.
+    # Send a full window schedule the first time a new session appears in it.
+    # Rechecking on each run lets newly added sessions trigger an updated schedule.
     for days in SCHEDULE_WINDOWS:
         deadline = now + timedelta(days=days)
-        window_races = [
-            item for item in upcoming_races
+        window_sessions = [
+            item for item in upcoming_sessions
             if now <= parse_time(item["date_start"]) <= deadline
         ]
-        pending_meetings = sorted({
-            item["meeting_key"] for item in window_races
-            if f"schedule:{YEAR}:{days}:{item['meeting_key']}" not in sent
+        pending_keys = sorted({
+            schedule_key(item, days) for item in window_sessions
+            if schedule_key(item, days) not in sent
         })
-        if not pending_meetings:
+        if not pending_keys:
             continue
-        notify(format_schedule(window_races, days), f"F1 schedule — next {days} days")
-        for meeting_key in pending_meetings:
-            sent[f"schedule:{YEAR}:{days}:{meeting_key}"] = now.isoformat()
+        notify(format_schedule(window_sessions, days), f"F1 schedule — next {days} days")
+        for key in pending_keys:
+            sent[key] = now.isoformat()
         save_state(state)
 
-    # One morning reminder for Sprint, Qualifying, and Race sessions on the user's day.
+    # One morning reminder for Sprint Qualifying, Sprint, Qualifying, and Race sessions on the user's day.
     local_today = now.astimezone(USER_TZ).date()
     today = [
         item for item in all_sessions
         if parse_time(item["date_start"]).astimezone(USER_TZ).date() == local_today
         and item["session_name"] in REMINDER_TYPES
     ]
-    for meeting_key in sorted({item["meeting_key"] for item in today}):
+    for meeting_key in sorted({item["meeting_key"] for item in today}, key=str):
         key = f"morning:{YEAR}:{local_today.isoformat()}:{meeting_key}"
         if key not in sent:
             notify(format_day_reminder([item for item in today if item["meeting_key"] == meeting_key], now), "F1 sessions today", "high")

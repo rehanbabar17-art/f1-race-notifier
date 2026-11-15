@@ -1,6 +1,6 @@
 # F1 Race Notifier
 
-A cron-friendly Formula 1 notification service. It sends race schedules for the next 30, 14, and 7 days, start-of-day reminders for sprint/qualifying/race sessions, and session results after practice, sprint, qualifying, and race sessions become available.
+A cron-friendly Formula 1 notification service. It sends schedules for the next 30, 14, and 7 days (covering Qualifying, Sprint Qualifying, Sprint, and Race sessions), start-of-day reminders for Sprint Qualifying, Sprint, Qualifying, and Race sessions, and session results after practice, sprint qualifying, sprint, qualifying, and race sessions become available.
 
 The script runs in GitHub Actions. **cron-job.org sends an authenticated workflow-dispatch request every five minutes**, so the repository does not need an always-on server.
 
@@ -11,8 +11,8 @@ not an F1 API or ntfy configuration error.
 
 ## What it sends
 
-- **Race schedules:** ntfy messages list Grand Prix races in the next 30, 14, and 7 days. A window is updated when a newly scheduled race first appears within it; each meeting is announced once per window.
-- **Morning reminder:** one message on the user's local calendar day listing that day's Sprint, Qualifying, and Race sessions.
+- **Session schedules:** ntfy messages list Qualifying, Sprint Qualifying, Sprint, and Grand Prix Race sessions in the next 30, 14, and 7 days. A window is updated when a newly scheduled session first appears within it.
+- **Morning reminder:** one message on the user's local calendar day listing that day's Sprint Qualifying, Sprint, Qualifying, and Race sessions.
 - **Results:** one message per Practice, Sprint, Qualifying, and Race session after the session is finalized. The notifier checks the official F1 LiveTiming archive first, then OpenF1, then Jolpica for Race, Qualifying, and Sprint fallback results. If all sources are empty or unavailable, the next cron run retries it.
 - **Standings:** after every Sprint and Race, the notifier first sends an explicitly unofficial driver and constructor estimate using the finishing positions (Grand Prix: 25–1 for places 1–10; Sprint: 8–1 for places 1–8) plus prior event points. When Jolpica's point-bearing results are published, it compares the official totals to the estimate and sends an official update only if the totals differ. For Sprint weekends, the Race update waits for the Sprint points as well. Estimates and official updates are deduplicated independently.
 - **Deduplication:** sent-message state is stored in `f1-race-notifier/state.json` inside the shared Backblaze B2 bucket.
